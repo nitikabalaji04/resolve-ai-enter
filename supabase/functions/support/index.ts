@@ -18,7 +18,7 @@ const AI_API_URL = "https://api.enter.pro/code/api/v1/ai/chat/completions";
 const AI_MODEL = "alibaba/qwen-3.7-plus";
 const ENTER_PROJECT_ID = "ff70718998987a15db5307804a6d9c00";
 
-const ALLOWED_DECISIONS = new Set(["approve", "deny", "escalate"]);
+const ALLOWED_DECISIONS = new Set(["inform", "approve", "deny", "escalate"]);
 const ALLOWED_ACTIONS = new Set(["refund_shipping_fee", "human_review", "no_action"]);
 
 type JsonObject = Record<string, unknown>;
@@ -98,14 +98,22 @@ ${JSON.stringify(investigation, null, 2)}
 INSTRUCTIONS:
 
 1. Understand the customer's intent from the message.
-2. Examine the customer information, order information, previous support tickets,
-   and relevant company policy.
-3. Reason only from the evidence provided.
-4. Decide whether the request can be handled automatically.
-5. If the customer clearly satisfies the relevant policy, recommend approval
-   and the appropriate automated action.
-6. If the request clearly does not qualify for the stated policy and is a simple
-   policy rejection, you may deny the request.
+2. Determine the customer's REQUESTED ACTION first: are they asking for
+   information only (order status, delivery status, tracking, a general
+   question), or are they asking for an action (refund, compensation,
+   cancellation, or another resolution)?
+   - Information/status request: decide "inform" and provide the order
+     status. Do NOT infer a refund request merely because the order is
+     delayed and happens to be eligible for a refund.
+   - Action request: evaluate the request against the applicable policy.
+3. Examine the customer information, order information, previous support
+   tickets, and relevant company policy.
+4. Reason only from the evidence provided.
+5. Only when the customer clearly requests a refund/compensation AND clearly
+   satisfies the relevant policy, recommend approval and the appropriate
+   automated action.
+6. If the request clearly does not qualify for the stated policy and is a
+   simple policy rejection, you may deny the request.
 7. If the request is unusual, outside the normal policy flow, requires human
    judgment, involves an exceptional request, or cannot be safely resolved
    automatically, recommend escalation.
@@ -115,10 +123,17 @@ INSTRUCTIONS:
 
 IMPORTANT DECISION RULES:
 
-- Clearly eligible under policy:
+- The customer only asks for information (order status, delivery status,
+  tracking, or a general question) and requests no action:
+  decision = "inform", action = "no_action"
+  Policy eligibility is NOT evaluated for information requests.
+
+- The customer clearly requests a refund/compensation AND clearly satisfies
+  the relevant policy:
   decision = "approve"
 
-- Clearly ineligible for a straightforward policy reason:
+- The customer clearly requests a refund/compensation but clearly does not
+  qualify for a straightforward policy reason:
   decision = "deny"
 
 - Unusual, exceptional, out-of-policy requests that may require human judgment,
@@ -135,6 +150,7 @@ IMPORTANT DECISION RULES:
 The "decision" and "action" fields are controlled by the ResolveAI backend.
 
 The "decision" field MUST be exactly one of:
+- "inform"
 - "approve"
 - "deny"
 - "escalate"
@@ -146,6 +162,7 @@ The "action" field MUST be exactly one of:
 
 Rules for decision and action:
 
+- If decision is "inform", action MUST be "no_action".
 - If decision is "approve", choose the appropriate automated action.
 - If decision is "deny", action MUST be "no_action".
 - If decision is "escalate", action MUST be "human_review".
@@ -162,7 +179,7 @@ Return your answer in this exact JSON structure:
 
 {
     "intent": "customer's main request",
-    "decision": "approve OR deny OR escalate",
+    "decision": "inform OR approve OR deny OR escalate",
     "reason": "short explanation based on the evidence",
     "action": "refund_shipping_fee OR human_review OR no_action",
     "evidence": [
@@ -297,6 +314,15 @@ function validateQwenDecision(
     };
   }
 
+  if (decision === "inform" && action !== "no_action") {
+    return {
+      valid: false,
+      reason: "Informational responses must use the no_action action.",
+      decision: "escalate",
+      action: "human_review",
+    };
+  }
+
   if (decision === "approve" && action === "human_review") {
     return {
       valid: false,
@@ -424,6 +450,51 @@ function createEscalationCase(input: {
   };
 }
 
+// Builds a concise human-readable description of the order's current status
+// from the real order fields. Never invents a delay value.
+function buildOrderStatusText(order: JsonObject): string {
+  const status = typeof order.status === "string" ? order.status : "";
+  const shipping =
+    typeof order.shipping_type === "string" ? order.shipping_type : "";
+  const delay =
+    typeof order.delivery_days_delayed === "number"
+      ? order.delivery_days_delayed
+      : null;
+  const expected =
+    typeof order.expected_delivery === "string"
+      ? order.expected_delivery
+      : "";
+  const actual =
+    typeof order.actual_delivery === "string" ? order.actual_delivery : "";
+
+  const bits: string[] = [];
+
+  if (shipping) {
+    bits.push(shipping.toLowerCase());
+  }
+
+  if (delay !== null && delay > 0) {
+    bits.push(`delayed by ${delay} ${delay === 1 ? "day" : "days"}`);
+  } else if (delay !== null) {
+    bits.push("on schedule");
+  }
+
+  if (actual) {
+    bits.push(`delivered on ${actual}`);
+  } else if (expected) {
+    bits.push(`expected delivery on ${expected}`);
+  }
+
+  if (
+    status &&
+    !bits.some((b) => b.includes(status.toLowerCase()))
+  ) {
+    bits.push(status);
+  }
+
+  return bits.length > 0 ? bits.join(" · ") : "status currently being updated";
+}
+
 // Step 8: build the customer-friendly response
 function buildCustomerResponse(
   decision: JsonObject,
@@ -459,10 +530,21 @@ function buildCustomerResponse(
     };
   }
 
+  if (decisionType === "inform") {
+    return {
+      status: "resolved",
+      message: `Hi ${customerName}, here is the current status of your order #${orderId}: ${buildOrderStatusText(order)}.`,
+      details:
+        "No action was required. This information is based on the recorded order details.",
+    };
+  }
+
   if (decisionType === "escalate") {
     return {
       status: "escalated",
-      message: `Hi ${customerName}, your request for order #${orderId} has been forwarded to a human support agent.`,
+      message: orderId
+        ? `Hi ${customerName}, your request for order #${orderId} has been forwarded to a human support agent.`
+        : `Hi ${customerName}, your request has been forwarded to a human support agent because the order details could not be verified.`,
       details:
         "We could not automatically resolve this request based on the available information and policy.",
     };
@@ -481,7 +563,9 @@ function buildCustomerResponse(
 
   return {
     status: "escalated",
-    message: `Hi ${customerName}, your request for order #${orderId} has been forwarded to a human support agent.`,
+    message: orderId
+      ? `Hi ${customerName}, your request for order #${orderId} has been forwarded to a human support agent.`
+      : `Hi ${customerName}, your request has been forwarded to a human support agent because the order details could not be verified.`,
     details: "The request requires further review.",
   };
 }
@@ -729,6 +813,100 @@ Deno.serve(async (req) => {
         resolution_status: customerResponse.status,
         customer_response: customerResponse,
         escalation_case: escalationCase,
+      });
+    }
+
+    // Step 9b: informational / order-status request — no action is executed.
+    if (validation.decision === "inform") {
+      // An informational response requires the order record; without it the
+      // case is safely escalated to human review instead.
+      if (!investigation.order) {
+        const escalationReason =
+          "The order details could not be verified.";
+
+        const escalationCase = createEscalationCase({
+          customerMessage: message,
+          investigation,
+          qwenResponse,
+          reason: escalationReason,
+        });
+
+        const escalatedDecision = {
+          decision: "escalate",
+          reason: escalationReason,
+          action: "human_review",
+          evidence: qwenObj.evidence ?? [],
+          intent: qwenObj.intent ?? "",
+        };
+
+        const customerResponse = buildCustomerResponse(
+          escalatedDecision,
+          investigation,
+        );
+
+        await persistCaseRecord(supabase, {
+          case_id: caseId,
+          customer_id: customerId,
+          order_id: orderId,
+          customer_message: message,
+          intent:
+            typeof qwenObj.intent === "string" ? qwenObj.intent : "",
+          decision: "escalate",
+          reason: escalationReason,
+          action: "human_review",
+          evidence: Array.isArray(qwenObj.evidence)
+            ? qwenObj.evidence
+            : [],
+          action_status: "not_required",
+          verification_status: "not_required",
+          resolution_status: customerResponse.status,
+          escalation_reason: escalationReason,
+          case_status: "escalated",
+        });
+
+        return json({
+          case_id: caseId,
+          customer_message: message,
+          investigation,
+          qwen_response: qwenResponse,
+          decision: escalatedDecision,
+          action_status: "not_required",
+          verification_status: "not_required",
+          resolution_status: customerResponse.status,
+          customer_response: customerResponse,
+          escalation_case: escalationCase,
+        });
+      }
+
+      const customerResponse = buildCustomerResponse(decision, investigation);
+
+      await persistCaseRecord(supabase, {
+        case_id: caseId,
+        customer_id: customerId,
+        order_id: orderId,
+        customer_message: message,
+        intent: typeof decision.intent === "string" ? decision.intent : "",
+        decision: decision.decision,
+        reason: decision.reason,
+        action: decision.action,
+        evidence: Array.isArray(decision.evidence) ? decision.evidence : [],
+        action_status: "not_required",
+        verification_status: "not_required",
+        resolution_status: customerResponse.status,
+        escalation_reason: null,
+        case_status: null,
+      });
+
+      return json({
+        case_id: caseId,
+        customer_message: message,
+        investigation,
+        qwen_response: qwenResponse,
+        decision,
+        action_status: "not_required",
+        verification_status: "not_required",
+        resolution_status: customerResponse.status,
+        customer_response: customerResponse,
       });
     }
 

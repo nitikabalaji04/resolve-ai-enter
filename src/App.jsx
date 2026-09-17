@@ -358,6 +358,7 @@ function App() {
       order?.days_delayed ??
       order?.delay_days ??
       order?.delayed_days ??
+      order?.delivery_days_delayed ??
       null
 
     const deliveryStatus =
@@ -629,7 +630,9 @@ function App() {
                       ? 'Refund approved'
                       : decision === 'deny'
                         ? 'Request not approved'
-                        : 'Human review required'}
+                        : decision === 'inform'
+                          ? 'Order information provided'
+                          : 'Human review required'}
               </h2>
             </div>
 
