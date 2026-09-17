@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { supabase } from '../integrations/supabase/client'
 import { RefreshCw, Inbox, AlertTriangle, ChevronLeft } from 'lucide-react'
 
@@ -120,6 +120,80 @@ async function updateSupportCase(caseId, patch) {
   return data
 }
 
+// Sends only the minimum fields needed to summarize the selected case.
+function buildSummaryPayload(selectedCase, context) {
+  const order = context?.order
+
+  return {
+    case_id: selectedCase.case_id,
+    customer_message: selectedCase.customer_message,
+    intent: selectedCase.intent,
+    decision: selectedCase.decision,
+    reason: selectedCase.reason,
+    evidence: selectedCase.evidence,
+    escalation_reason: selectedCase.escalation_reason,
+    customer: context?.customer
+      ? {
+          name: context.customer.name,
+          membership: context.customer.membership,
+        }
+      : null,
+    order: order
+      ? {
+          order_id: order.order_id,
+          product: order.product,
+          amount: order.amount,
+          status: order.status,
+          shipping_type: order.shipping_type,
+          delivery_days_delayed: order.delivery_days_delayed,
+          expected_delivery: order.expected_delivery,
+          actual_delivery: order.actual_delivery,
+          payment_status: order.payment_status,
+          refund_status: order.refund_status,
+        }
+      : null,
+    support_history:
+      context?.tickets?.map((t) => ({
+        subject: t.subject,
+        message: t.message,
+        status: t.status,
+        created_date: t.created_date,
+      })) || [],
+    policy: context?.policy
+      ? {
+          title: context.policy.title,
+          action: context.policy.action,
+        }
+      : null,
+  }
+}
+
+// Calls the case-summary backend function, which keeps the Qwen API token
+// server-side. Returns the validated { issue, investigation, why_escalated,
+// recommended_agent_check } object.
+async function requestCaseSummary(payload) {
+  const { data, error } = await supabase.functions.invoke(
+    'case-summary',
+    {
+      body: { case: payload },
+    }
+  )
+
+  if (error) {
+    throw new Error('AI summary unavailable.')
+  }
+
+  if (
+    !data ||
+    typeof data !== 'object' ||
+    typeof data.error === 'string'
+  ) {
+    throw new Error('AI summary unavailable.')
+  }
+
+  return data
+}
+
 export default function CaseManagement({ user }) {
   const [cases, setCases] = useState([])
   const [loading, setLoading] = useState(true)
@@ -130,6 +204,8 @@ export default function CaseManagement({ user }) {
   const [actionLoading, setActionLoading] = useState(false)
   const [actionError, setActionError] = useState(null)
   const [actionNotice, setActionNotice] = useState(null)
+  const [summaries, setSummaries] = useState({})
+  const summaryInFlight = useRef(new Set())
   const [contextState, setContextState] = useState({
     caseId: null,
     customer: null,
@@ -234,6 +310,63 @@ export default function CaseManagement({ user }) {
     selectedCase && contextState.caseId === selectedCase.case_id
       ? contextState
       : null
+
+  // Generate an AI Case Summary on demand: only for escalated cases the agent
+  // opens, only after the case context is loaded, and at most once per case per
+  // session (cached in `summaries`; `summaryInFlight` guards concurrent runs so
+  // normal React re-renders never trigger duplicate Qwen calls).
+  const needsSummary =
+    selectedCase?.resolution_status === 'escalated'
+
+  useEffect(() => {
+    if (!needsSummary || !selectedCase) return
+
+    if (caseContext === null) return
+
+    const caseId = selectedCase.case_id
+
+    if (summaries[caseId]) return
+
+    if (summaryInFlight.current.has(caseId)) return
+
+    summaryInFlight.current.add(caseId)
+
+    let cancelled = false
+
+    const load = async () => {
+      try {
+        const data = await requestCaseSummary(
+          buildSummaryPayload(selectedCase, caseContext)
+        )
+
+        if (!cancelled) {
+          setSummaries((prev) => ({
+            ...prev,
+            [caseId]: { status: 'ready', data },
+          }))
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setSummaries((prev) => ({
+            ...prev,
+            [caseId]: {
+              status: 'error',
+              message:
+                err?.message || 'AI summary unavailable.',
+            },
+          }))
+        }
+      } finally {
+        summaryInFlight.current.delete(caseId)
+      }
+    }
+
+    load()
+
+    return () => {
+      cancelled = true
+    }
+  }, [needsSummary, selectedCase, caseContext, summaries])
 
   const replaceCaseInList = (updated) => {
     setCases((prev) =>
@@ -602,6 +735,67 @@ export default function CaseManagement({ user }) {
               </div>
 
               <div className="case-detail-body">
+                {needsSummary && (
+                  <div className="case-detail-section full">
+                    <span className="case-detail-label">
+                      AI CASE SUMMARY
+                    </span>
+
+                    {(() => {
+                      const summary =
+                        summaries[selectedCase.case_id]
+
+                      if (!summary) {
+                        return (
+                          <p className="case-context-note">
+                            Generating summary...
+                          </p>
+                        )
+                      }
+
+                      if (summary.status === 'error') {
+                        return (
+                          <p className="case-context-note">
+                            {summary.message}
+                          </p>
+                        )
+                      }
+
+                      return (
+                        <div className="ai-summary">
+                          <div className="ai-summary-block">
+                            <span>Issue</span>
+
+                            <p>{summary.data.issue}</p>
+                          </div>
+
+                          <div className="ai-summary-block">
+                            <span>Investigation</span>
+
+                            <p>{summary.data.investigation}</p>
+                          </div>
+
+                          <div className="ai-summary-block">
+                            <span>Why AI Escalated</span>
+
+                            <p>{summary.data.why_escalated}</p>
+                          </div>
+
+                          <div className="ai-summary-block">
+                            <span>
+                              Recommended Agent Check
+                            </span>
+
+                            <p>
+                              {summary.data.recommended_agent_check}
+                            </p>
+                          </div>
+                        </div>
+                      )
+                    })()}
+                  </div>
+                )}
+
                 <div className="case-detail-field full">
                   <span className="case-detail-label">
                     CUSTOMER MESSAGE

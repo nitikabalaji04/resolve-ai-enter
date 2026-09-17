@@ -3783,3 +3783,40 @@ button {
 .agent-note-area textarea::placeholder {
   color: #515d6b;
 }
+
+/* ================================
+   AI CASE SUMMARY
+================================ */
+
+.ai-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+
+  padding: 14px 15px;
+
+  background: rgba(32, 223, 255, 0.025);
+
+  border: 1px solid rgba(32, 223, 255, 0.14);
+  border-radius: 9px;
+}
+
+.ai-summary-block {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.ai-summary-block span {
+  font-size: 9px;
+  font-weight: 750;
+  color: #20dfff;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+}
+
+.ai-summary-block p {
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: #c6d2dd;
+}
