@@ -3820,3 +3820,50 @@ button {
   line-height: 1.55;
   color: #c6d2dd;
 }
+
+/* ================================
+   DASHBOARD REAL DATA
+================================ */
+
+.dashboard-error-banner {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+
+  margin-bottom: 18px;
+  padding: 12px 15px;
+
+  color: #f08a8a;
+  background: rgba(240, 138, 138, 0.06);
+
+  border: 1px solid rgba(240, 138, 138, 0.22);
+  border-radius: 10px;
+
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.panel-link {
+  padding: 2px 3px;
+
+  color: #20dfff;
+  background: none;
+
+  border: none;
+
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.panel-link:hover {
+  text-decoration: underline;
+}
+
+.dashboard-note {
+  padding: 20px;
+
+  color: #657180;
+
+  font-size: 10.5px;
+  line-height: 1.5;
+}

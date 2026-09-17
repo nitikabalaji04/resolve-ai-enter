@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { supabase } from './integrations/supabase/client'
 import CaseManagement from './components/CaseManagement'
 import AgentLogin from './components/AgentLogin'
+import DashboardData from './components/DashboardData'
 import {
   LayoutDashboard,
   MessageCircle,
@@ -322,137 +323,7 @@ function App() {
         </button>
       </div>
 
-      <div className="stats-grid">
-        <div className="stat-card">
-          <div className="stat-icon">
-            <Clock3 size={18} />
-          </div>
-
-          <div>
-            <span>Active Cases</span>
-            <strong>12</strong>
-          </div>
-        </div>
-
-        <div className="stat-card">
-          <div className="stat-icon">
-            <Check size={18} />
-          </div>
-
-          <div>
-            <span>Resolved Cases</span>
-            <strong>148</strong>
-          </div>
-        </div>
-
-        <div className="stat-card">
-          <div className="stat-icon">
-            <AlertTriangle size={18} />
-          </div>
-
-          <div>
-            <span>Escalated Cases</span>
-            <strong>18</strong>
-          </div>
-        </div>
-
-        <div className="stat-card">
-          <div className="stat-icon">
-            <ShieldCheck size={18} />
-          </div>
-
-          <div>
-            <span>Resolution Rate</span>
-            <strong>89%</strong>
-          </div>
-        </div>
-      </div>
-
-      <div className="dashboard-grid">
-        <div className="panel">
-          <div className="panel-header">
-            <div>
-              <p className="eyebrow">CASE MANAGEMENT</p>
-              <h3>Recent Cases</h3>
-            </div>
-
-            <span className="panel-link">View all</span>
-          </div>
-
-          <div className="case-list">
-            <div className="case-row">
-              <div>
-                <strong>#10482</strong>
-                <span>Delayed delivery</span>
-              </div>
-
-              <span className="case-status resolved">
-                Resolved
-              </span>
-            </div>
-
-            <div className="case-row">
-              <div>
-                <strong>#10481</strong>
-                <span>Damaged order</span>
-              </div>
-
-              <span className="case-status investigating">
-                Investigating
-              </span>
-            </div>
-
-            <div className="case-row">
-              <div>
-                <strong>#10480</strong>
-                <span>Duplicate payment</span>
-              </div>
-
-              <span className="case-status escalated">
-                Escalated
-              </span>
-            </div>
-          </div>
-        </div>
-
-        <div className="panel">
-          <div className="panel-header">
-            <div>
-              <p className="eyebrow">AI ACTIVITY</p>
-              <h3>Autonomous Workflow</h3>
-            </div>
-          </div>
-
-          <div className="activity-list">
-            <div className="activity-item">
-              <Check size={15} />
-
-              <div>
-                <strong>Policy checked</strong>
-                <span>Case #10482</span>
-              </div>
-            </div>
-
-            <div className="activity-item">
-              <Check size={15} />
-
-              <div>
-                <strong>AI decision generated</strong>
-                <span>Refund approved</span>
-              </div>
-            </div>
-
-            <div className="activity-item">
-              <Check size={15} />
-
-              <div>
-                <strong>Refund initiated</strong>
-                <span>Case #10482</span>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
+      <DashboardData onViewAll={() => setActivePage('Case Management')} />
     </div>
   )
 
