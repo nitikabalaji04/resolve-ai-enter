@@ -1,91 +1,16 @@
 import { useEffect, useState } from 'react'
-import { supabase } from '../integrations/supabase/client'
 import {
   Clock3,
   Check,
   AlertTriangle,
   ShieldCheck,
 } from 'lucide-react'
-
-async function fetchDashboardRows() {
-  const { data, error } = await supabase
-    .from('support_cases')
-    .select(
-      'case_id, order_id, customer_id, customer_message, decision, action, action_status, resolution_status, case_status, reason, created_at'
-    )
-    .order('created_at', { ascending: false })
-
-  if (error) throw error
-
-  return data || []
-}
-
-// Statistics definitions (no double counting):
-// - Total: all records
-// - Active: escalated or in_review, not human_resolved
-// - Resolved: resolution_status = resolved OR case_status = human_resolved
-// - Escalated: resolution_status = escalated AND not human_resolved
-// - Resolution rate: round(resolved / total * 100), 0 when there are no cases
-function computeStats(rows) {
-  const total = rows.length
-
-  const resolved = rows.filter(
-    (c) =>
-      c.resolution_status === 'resolved' ||
-      c.case_status === 'human_resolved'
-  ).length
-
-  const escalated = rows.filter(
-    (c) =>
-      c.resolution_status === 'escalated' &&
-      c.case_status !== 'human_resolved'
-  ).length
-
-  const active = rows.filter((c) => {
-    if (c.case_status === 'human_resolved') return false
-
-    if (
-      c.case_status === 'escalated' ||
-      c.case_status === 'in_review'
-    ) {
-      return true
-    }
-
-    // Older escalated rows before the lifecycle existed.
-    if (c.case_status == null && c.resolution_status === 'escalated') {
-      return true
-    }
-
-    return false
-  }).length
-
-  const rate = total === 0 ? 0 : Math.round((resolved / total) * 100)
-
-  return { total, resolved, escalated, active, rate }
-}
-
-function recentStatus(c) {
-  if (
-    c.case_status === 'human_resolved' ||
-    c.resolution_status === 'resolved'
-  ) {
-    return { label: 'Resolved', className: 'case-status resolved' }
-  }
-
-  if (c.case_status === 'in_review') {
-    return { label: 'In Review', className: 'case-status investigating' }
-  }
-
-  return { label: 'Escalated', className: 'case-status escalated' }
-}
-
-function titleFrom(c) {
-  const message = (c.customer_message || '').trim()
-
-  if (!message) return 'No customer message'
-
-  return message.length > 60 ? `${message.slice(0, 60)}…` : message
-}
+import {
+  fetchSupportCases,
+  computeStats,
+  recentStatus,
+  titleFrom,
+} from '../utils/supportCases'
 
 // Derives the workflow activity from the most recent real case only.
 function activityItems(rows) {
@@ -135,7 +60,7 @@ export default function DashboardData({ onViewAll }) {
 
     const load = async () => {
       try {
-        const rows = await fetchDashboardRows()
+        const rows = await fetchSupportCases()
 
         if (!cancelled) {
           setStats(computeStats(rows))

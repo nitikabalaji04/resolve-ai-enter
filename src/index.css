@@ -3867,3 +3867,77 @@ button {
   font-size: 10.5px;
   line-height: 1.5;
 }
+
+/* ================================
+   HUMAN REVIEW QUEUE
+================================ */
+
+.queue-case-row {
+  cursor: pointer;
+
+  transition: background 0.2s ease;
+}
+
+.queue-case-row:hover {
+  background: rgba(0, 200, 255, 0.035);
+}
+
+.queue-case-row.selected {
+  background: rgba(0, 200, 255, 0.065);
+
+  box-shadow: inset 2px 0 0 #22d3ee;
+}
+
+/* Status badges used on the Investigations and Agent Dashboard pages. */
+
+.ai-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+
+  padding: 7px 13px;
+
+  color: #20dfff;
+
+  border: 1px solid rgba(34, 211, 238, 0.22);
+  border-radius: 999px;
+
+  background: rgba(34, 211, 238, 0.07);
+
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+
+  white-space: nowrap;
+}
+
+.ai-status > span {
+  width: 7px;
+  height: 7px;
+
+  border-radius: 50%;
+
+  background: #20dfff;
+
+  box-shadow: 0 0 0 3px rgba(34, 211, 238, 0.18);
+}
+
+.active-count {
+  display: inline-flex;
+  align-items: center;
+
+  padding: 5px 9px;
+
+  color: #22d3ee;
+
+  border: 1px solid rgba(34, 211, 238, 0.18);
+  border-radius: 999px;
+
+  background: rgba(34, 211, 238, 0.08);
+
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+
+  white-space: nowrap;
+}
