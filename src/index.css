@@ -3309,3 +3309,308 @@ button {
   line-height: 1.5;
   color: #9fb3c4;
 }
+
+/* ================================
+   HUMAN AGENT AUTH
+================================ */
+
+.session-check {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  min-height: 50vh;
+
+  color: #6c7887;
+  font-size: 12px;
+}
+
+.agent-login-page {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  min-height: calc(100vh - 140px);
+
+  padding: 24px 0;
+}
+
+.agent-login-card {
+  width: 100%;
+  max-width: 420px;
+
+  padding: 30px 28px;
+
+  background:
+    linear-gradient(180deg,
+      #0f1319 0%,
+      #0d1117 100%);
+
+  border: 1px solid #1e2731;
+  border-radius: 14px;
+
+  box-shadow:
+    0 12px 35px rgba(0, 0, 0, 0.12);
+}
+
+.agent-login-header {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+
+  gap: 9px;
+
+  text-align: center;
+
+  margin-bottom: 22px;
+}
+
+.agent-login-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  width: 46px;
+  height: 46px;
+
+  margin-bottom: 4px;
+
+  color: #20dfff;
+
+  background: rgba(32, 223, 255, 0.07);
+
+  border: 1px solid rgba(32, 223, 255, 0.18);
+  border-radius: 12px;
+}
+
+.agent-login-header h2 {
+  color: #f1f5f8;
+
+  font-size: 18px;
+  font-weight: 650;
+
+  letter-spacing: -0.4px;
+}
+
+.agent-login-header > p:last-child {
+  font-size: 11px;
+  line-height: 1.6;
+  color: #6c7887;
+}
+
+.agent-login-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.agent-login-field {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.agent-login-field > span {
+  font-size: 8.5px;
+  font-weight: 750;
+  color: #6c7887;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+
+.agent-login-input-wrap {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+
+  padding: 0 12px;
+
+  color: #515d6b;
+
+  background: #090d12;
+
+  border: 1px solid #252f3a;
+  border-radius: 8px;
+
+  transition:
+    border-color 0.2s ease,
+    box-shadow 0.2s ease;
+}
+
+.agent-login-input-wrap:focus-within {
+  color: #20dfff;
+
+  border-color: rgba(32, 223, 255, 0.45);
+
+  box-shadow:
+    0 0 0 3px rgba(32, 223, 255, 0.045);
+}
+
+.agent-login-input-wrap input {
+  flex: 1;
+
+  min-width: 0;
+  padding: 11px 0;
+
+  color: #edf3f7;
+  background: transparent;
+
+  border: none;
+  outline: none;
+
+  font-size: 12px;
+}
+
+.agent-login-input-wrap input::placeholder {
+  color: #515d6b;
+}
+
+.agent-login-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  gap: 8px;
+
+  margin-top: 6px;
+  padding: 12px 14px;
+
+  color: #06121a;
+  background: #20dfff;
+
+  border: none;
+  border-radius: 9px;
+
+  font-size: 12px;
+  font-weight: 750;
+  letter-spacing: 0.02em;
+
+  transition:
+    background 0.2s ease,
+    transform 0.1s ease;
+}
+
+.agent-login-btn:hover {
+  background: #54e6ff;
+}
+
+.agent-login-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.agent-login-message {
+  padding: 11px 13px;
+
+  margin-bottom: 16px;
+
+  border-radius: 8px;
+
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.agent-login-message.error {
+  color: #f08a8a;
+  background: rgba(240, 138, 138, 0.07);
+  border: 1px solid rgba(240, 138, 138, 0.22);
+}
+
+.agent-login-message.notice {
+  color: #20e0a8;
+  background: rgba(25, 230, 176, 0.07);
+  border: 1px solid rgba(25, 230, 176, 0.2);
+}
+
+.agent-login-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+
+  gap: 5px;
+
+  margin-top: 20px;
+
+  font-size: 11px;
+  color: #6c7887;
+}
+
+.agent-login-toggle button {
+  padding: 2px 3px;
+
+  color: #20dfff;
+  background: none;
+
+  border: none;
+
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.agent-login-toggle button:hover {
+  text-decoration: underline;
+}
+
+.agent-session {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+
+  margin-top: 12px;
+  padding-top: 12px;
+
+  border-top: 1px solid #1d2731;
+}
+
+.agent-session-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+
+  min-width: 0;
+
+  color: #6c7887;
+
+  font-size: 9.5px;
+}
+
+.agent-session-info svg {
+  flex-shrink: 0;
+  color: #20d8a7;
+}
+
+.agent-session-info span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.logout-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  gap: 7px;
+
+  width: 100%;
+  padding: 8px 10px;
+
+  color: #9fb3c4;
+  background: transparent;
+
+  border: 1px solid #1e2731;
+  border-radius: 8px;
+
+  font-size: 10px;
+  font-weight: 650;
+
+  transition:
+    color 0.2s ease,
+    border-color 0.2s ease;
+}
+
+.logout-btn:hover {
+  color: #f08a8a;
+  border-color: rgba(240, 138, 138, 0.35);
+}

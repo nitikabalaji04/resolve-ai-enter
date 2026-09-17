@@ -1,6 +1,7 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { supabase } from './integrations/supabase/client'
 import CaseManagement from './components/CaseManagement'
+import AgentLogin from './components/AgentLogin'
 import {
   LayoutDashboard,
   MessageCircle,
@@ -23,6 +24,7 @@ import {
   Brain,
   UserRound,
   FolderOpen,
+  LogOut,
 } from 'lucide-react'
 
 function App() {
@@ -33,6 +35,26 @@ function App() {
   const [investigationStep, setInvestigationStep] = useState(0)
   const [selectedCase, setSelectedCase] = useState('#10482')
   const [supportResult, setSupportResult] = useState(null)
+  const [session, setSession] = useState(null)
+  const [sessionLoading, setSessionLoading] = useState(true)
+
+  useEffect(() => {
+    // Register the listener BEFORE checking for an existing session.
+    const { data: listener } = supabase.auth.onAuthStateChange(
+      (_event, newSession) => {
+        setSession(newSession)
+      }
+    )
+
+    supabase.auth.getSession().then(({ data }) => {
+      setSession(data.session)
+      setSessionLoading(false)
+    })
+
+    return () => {
+      listener.subscription.unsubscribe()
+    }
+  }, [])
 
   // Safely convert backend values into text
   const safeText = (value, fallback = '') => {
@@ -1556,6 +1578,25 @@ function App() {
     <CaseManagement />
   )
 
+  // Case Management and the Agent Dashboard are Human Agent areas.
+  // Show a session check while restoring the session, the login screen when
+  // signed out, and the page only when an agent is authenticated.
+  const renderAgentGate = (renderFn) => {
+    if (sessionLoading) {
+      return (
+        <div className="session-check">
+          <p>Checking session...</p>
+        </div>
+      )
+    }
+
+    if (!session) {
+      return <AgentLogin />
+    }
+
+    return renderFn()
+  }
+
   const renderPage = () => {
     switch (activePage) {
       case 'Customer Support':
@@ -1565,10 +1606,10 @@ function App() {
         return renderInvestigations()
 
       case 'Case Management':
-        return renderCaseManagement()
+        return renderAgentGate(renderCaseManagement)
 
       case 'Agent Dashboard':
-        return renderAgentDashboard()
+        return renderAgentGate(renderAgentDashboard)
 
       case 'Dashboard':
       default:
@@ -1684,6 +1725,28 @@ function App() {
               </small>
             </div>
           </div>
+
+          {session && (
+            <div className="agent-session">
+              <div className="agent-session-info">
+                <ShieldCheck size={13} />
+
+                <span>
+                  {session.user.email}
+                </span>
+              </div>
+
+              <button
+                type="button"
+                className="logout-btn"
+                onClick={() => supabase.auth.signOut()}
+              >
+                <LogOut size={13} />
+
+                <span>Sign out</span>
+              </button>
+            </div>
+          )}
         </div>
       </aside>
 

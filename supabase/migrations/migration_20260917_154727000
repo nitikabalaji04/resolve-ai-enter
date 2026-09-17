@@ -1,0 +1,5 @@
+drop policy if exists "support_cases_select_anon" on public.support_cases;
+drop policy if exists "customers_select_anon" on public.customers;
+drop policy if exists "orders_select_anon" on public.orders;
+drop policy if exists "tickets_select_anon" on public.tickets;
+drop policy if exists "policies_select_anon" on public.policies;
