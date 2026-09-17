@@ -1,0 +1,4 @@
+create policy "customers_select_anon" on public.customers for select to anon using (true);
+create policy "orders_select_anon" on public.orders for select to anon using (true);
+create policy "tickets_select_anon" on public.tickets for select to anon using (true);
+create policy "policies_select_anon" on public.policies for select to anon using (true);
