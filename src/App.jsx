@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { supabase } from './integrations/supabase/client'
 import {
   LayoutDashboard,
   MessageCircle,
@@ -146,26 +147,24 @@ function App() {
         orderId = '10483'
       }
 
-      const response = await fetch(
-        'https://resolve-ai-backend-no5u.onrender.com/api/support',
+      const { data, error } = await supabase.functions.invoke(
+        'support',
         {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
+          body: {
             customer_id: customerId,
             order_id: orderId,
             message: userComplaint,
-          }),
+          },
         }
       )
 
-      if (!response.ok) {
-        throw new Error(`Backend error: ${response.status}`)
+      if (error) {
+        throw new Error(
+          error.context?.error ||
+            error.message ||
+            `Backend error: ${error.status ?? 'unknown'}`
+        )
       }
-
-      const data = await response.json()
 
       console.log('ResolveAI backend response:', data)
 
