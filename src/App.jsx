@@ -1575,7 +1575,7 @@ function App() {
   // IMPORTANT:
   // Call the render functions with ()
   const renderCaseManagement = () => (
-    <CaseManagement />
+    <CaseManagement user={session?.user ?? null} />
   )
 
   // Case Management and the Agent Dashboard are Human Agent areas.

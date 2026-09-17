@@ -503,6 +503,7 @@ interface SupportCaseRecord {
   verification_status: string;
   resolution_status: string;
   escalation_reason: string | null;
+  case_status: string | null;
 }
 
 async function persistCaseRecord(
@@ -599,6 +600,7 @@ Deno.serve(async (req) => {
         verification_status: "not_required",
         resolution_status: customerResponse.status,
         escalation_reason: escalationCase.escalation_reason,
+        case_status: "escalated",
       });
 
       return json({
@@ -655,6 +657,7 @@ Deno.serve(async (req) => {
         verification_status: "not_required",
         resolution_status: customerResponse.status,
         escalation_reason: escalationCase.escalation_reason,
+        case_status: "escalated",
       });
 
       return json({
@@ -712,6 +715,7 @@ Deno.serve(async (req) => {
         verification_status: "not_required",
         resolution_status: customerResponse.status,
         escalation_reason: escalationCase.escalation_reason,
+        case_status: "escalated",
       });
 
       return json({
@@ -775,6 +779,7 @@ Deno.serve(async (req) => {
           : "failed",
       resolution_status: customerResponse.status,
       escalation_reason: null,
+      case_status: null,
     });
 
     return json({

@@ -104,12 +104,32 @@ async function fetchCustomerContext(customerId, orderId, action) {
   }
 }
 
-export default function CaseManagement() {
+// Applies a human-agent handling update to one case and returns the fresh row.
+// The authenticated session's JWT is sent automatically by the Supabase client;
+// RLS limits this to the agent-handling columns.
+async function updateSupportCase(caseId, patch) {
+  const { data, error } = await supabase
+    .from('support_cases')
+    .update({ ...patch, updated_at: new Date().toISOString() })
+    .eq('case_id', caseId)
+    .select()
+    .single()
+
+  if (error) throw error
+
+  return data
+}
+
+export default function CaseManagement({ user }) {
   const [cases, setCases] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
   const [filter, setFilter] = useState('all')
   const [selectedId, setSelectedId] = useState(null)
+  const [noteDraft, setNoteDraft] = useState('')
+  const [actionLoading, setActionLoading] = useState(false)
+  const [actionError, setActionError] = useState(null)
+  const [actionNotice, setActionNotice] = useState(null)
   const [contextState, setContextState] = useState({
     caseId: null,
     customer: null,
@@ -214,6 +234,191 @@ export default function CaseManagement() {
     selectedCase && contextState.caseId === selectedCase.case_id
       ? contextState
       : null
+
+  const replaceCaseInList = (updated) => {
+    setCases((prev) =>
+      prev.map((c) => (c.case_id === updated.case_id ? updated : c))
+    )
+  }
+
+  const runAction = async (patch, successMessage) => {
+    if (!user || !selectedCase) return
+
+    setActionLoading(true)
+    setActionError(null)
+    setActionNotice(null)
+
+    try {
+      const updated = await updateSupportCase(
+        selectedCase.case_id,
+        patch
+      )
+
+      replaceCaseInList(updated)
+      setActionNotice(successMessage)
+    } catch (err) {
+      setActionError(
+        err?.message || 'Could not update the case.'
+      )
+    } finally {
+      setActionLoading(false)
+    }
+  }
+
+  const startReview = () =>
+    runAction(
+      { case_status: 'in_review' },
+      'Review started.'
+    )
+
+  const resolveCase = () =>
+    runAction(
+      {
+        case_status: 'human_resolved',
+        agent_id: user?.id,
+        agent_email: user?.email,
+        agent_note: noteDraft || selectedCase?.agent_note || null,
+        resolved_at: new Date().toISOString(),
+      },
+      'Case resolved.'
+    )
+
+  const keepEscalated = () =>
+    runAction(
+      {
+        case_status: 'escalated',
+        agent_note: noteDraft || selectedCase?.agent_note || null,
+      },
+      'Case kept escalated.'
+    )
+
+  const saveNote = () =>
+    runAction(
+      { agent_note: noteDraft || null },
+      'Note saved.'
+    )
+
+  const renderAgentActions = () => {
+    if (!user || !selectedCase) return null
+
+    const caseStatus = selectedCase.case_status
+
+    if (caseStatus === 'human_resolved') {
+      return (
+        <div className="case-detail-section full">
+          <span className="case-detail-label">
+            HUMAN AGENT HANDLING
+          </span>
+
+          <div className="agent-case-status">
+            <div className="agent-case-status-row">
+              <span>Case Status</span>
+              <strong>Human Resolved</strong>
+            </div>
+
+            <div className="agent-case-status-row">
+              <span>Resolved By</span>
+              <strong>{selectedCase.agent_email || '—'}</strong>
+            </div>
+
+            <div className="agent-case-status-row">
+              <span>Resolved At</span>
+              <strong>{formatDate(selectedCase.resolved_at)}</strong>
+            </div>
+
+            {selectedCase.agent_note && (
+              <div className="agent-case-note">
+                <span>Agent Note</span>
+                <p>{selectedCase.agent_note}</p>
+              </div>
+            )}
+          </div>
+        </div>
+      )
+    }
+
+    const inReview = caseStatus === 'in_review'
+
+    return (
+      <div className="case-detail-section full">
+        <span className="case-detail-label">
+          HUMAN AGENT HANDLING
+        </span>
+
+        <div className="agent-case-status">
+          <div className="agent-case-status-row">
+            <span>Case Status</span>
+            <strong>{inReview ? 'In Review' : 'Escalated'}</strong>
+          </div>
+        </div>
+
+        {actionError && (
+          <div className="agent-action-message error">
+            {actionError}
+          </div>
+        )}
+
+        {actionNotice && (
+          <div className="agent-action-message notice">
+            {actionNotice}
+          </div>
+        )}
+
+        <div className="agent-action-row">
+          {!inReview && (
+            <button
+              type="button"
+              className="agent-action-btn primary"
+              onClick={startReview}
+              disabled={actionLoading}
+            >
+              {actionLoading ? 'Please wait...' : 'Start Review'}
+            </button>
+          )}
+
+          {inReview && (
+            <>
+              <button
+                type="button"
+                className="agent-action-btn primary"
+                onClick={resolveCase}
+                disabled={actionLoading}
+              >
+                {actionLoading ? 'Please wait...' : 'Resolve Case'}
+              </button>
+
+              <button
+                type="button"
+                className="agent-action-btn"
+                onClick={keepEscalated}
+                disabled={actionLoading}
+              >
+                Keep Escalated
+              </button>
+            </>
+          )}
+        </div>
+
+        <div className="agent-note-area">
+          <textarea
+            value={noteDraft}
+            onChange={(e) => setNoteDraft(e.target.value)}
+            placeholder="Add an agent note (optional)..."
+            rows={3}
+          />
+
+          <button
+            type="button"
+            className="agent-action-btn"
+            onClick={saveNote}
+            disabled={actionLoading}
+          >
+            {actionLoading ? 'Saving...' : 'Add Agent Note'}
+          </button>
+        </div>
+      </div>
+    )
+  }
 
   const contextField = (label, value, full = false) => (
     <div className={`case-context-field ${full ? 'full' : ''}`}>
@@ -342,7 +547,12 @@ export default function CaseManagement() {
                   className={`case-list-item ${
                     selectedCase?.case_id === c.case_id ? 'active' : ''
                   }`}
-                  onClick={() => setSelectedId(c.case_id)}
+                  onClick={() => {
+                    setSelectedId(c.case_id)
+                    setNoteDraft(c.agent_note || '')
+                    setActionError(null)
+                    setActionNotice(null)
+                  }}
                 >
                   <div className="case-list-top">
                     <strong>{c.case_id}</strong>
@@ -506,6 +716,8 @@ export default function CaseManagement() {
                     {selectedCase.escalation_reason || 'Not escalated — no escalation reason.'}
                   </p>
                 </div>
+
+                {selectedCase.case_status && renderAgentActions()}
 
                 <div className="case-detail-section full">
                   <span className="case-detail-label">

@@ -1,0 +1,27 @@
+alter table public.support_cases
+  add column if not exists case_status text,
+  add column if not exists agent_id text,
+  add column if not exists agent_email text,
+  add column if not exists agent_note text,
+  add column if not exists resolved_at timestamptz,
+  add column if not exists updated_at timestamptz;
+
+-- Existing escalated cases enter the human lifecycle as 'escalated'.
+update public.support_cases
+  set case_status = 'escalated'
+  where resolution_status = 'escalated'
+    and case_status is null;
+
+-- Tighten write access: anonymous users get no update capability; authenticated
+-- agents may update only the human-agent handling fields.
+revoke update on public.support_cases from anon;
+revoke update on public.support_cases from authenticated;
+
+grant update (case_status, agent_id, agent_email, agent_note, resolved_at, updated_at)
+  on public.support_cases to authenticated;
+
+create policy "support_cases_update_authenticated"
+  on public.support_cases
+  for update to authenticated
+  using (true)
+  with check (true);

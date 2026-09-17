@@ -3614,3 +3614,172 @@ button {
   color: #f08a8a;
   border-color: rgba(240, 138, 138, 0.35);
 }
+
+/* ================================
+   HUMAN AGENT CASE LIFECYCLE
+================================ */
+
+.agent-case-status {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+
+  padding: 13px 15px;
+
+  background: rgba(255, 255, 255, 0.02);
+
+  border: 1px solid #1e2731;
+  border-radius: 9px;
+}
+
+.agent-case-status-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.agent-case-status-row span {
+  font-size: 9px;
+  font-weight: 750;
+  color: #6c7887;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+}
+
+.agent-case-status-row strong {
+  font-size: 12px;
+  font-weight: 650;
+  color: #e8eef3;
+}
+
+.agent-case-note {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+
+  padding-top: 10px;
+
+  border-top: 1px solid #1b232d;
+}
+
+.agent-case-note span {
+  font-size: 9px;
+  font-weight: 750;
+  color: #6c7887;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+}
+
+.agent-case-note p {
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: #9fb3c4;
+}
+
+.agent-action-message {
+  padding: 10px 13px;
+
+  border-radius: 8px;
+
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.agent-action-message.error {
+  color: #f08a8a;
+  background: rgba(240, 138, 138, 0.07);
+  border: 1px solid rgba(240, 138, 138, 0.22);
+}
+
+.agent-action-message.notice {
+  color: #20e0a8;
+  background: rgba(25, 230, 176, 0.07);
+  border: 1px solid rgba(25, 230, 176, 0.2);
+}
+
+.agent-action-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 9px;
+}
+
+.agent-action-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+
+  padding: 9px 15px;
+
+  color: #9fb3c4;
+  background: transparent;
+
+  border: 1px solid #2b3744;
+  border-radius: 8px;
+
+  font-size: 11px;
+  font-weight: 650;
+
+  transition:
+    color 0.2s ease,
+    border-color 0.2s ease,
+    background 0.2s ease;
+}
+
+.agent-action-btn:hover {
+  color: #20dfff;
+  border-color: rgba(32, 223, 255, 0.4);
+}
+
+.agent-action-btn.primary {
+  color: #06121a;
+  background: #20dfff;
+  border-color: #20dfff;
+}
+
+.agent-action-btn.primary:hover {
+  background: #54e6ff;
+  border-color: #54e6ff;
+}
+
+.agent-action-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.agent-note-area {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 9px;
+}
+
+.agent-note-area textarea {
+  width: 100%;
+
+  padding: 10px 12px;
+
+  color: #edf3f7;
+  background: #090d12;
+
+  border: 1px solid #252f3a;
+  border-radius: 8px;
+
+  outline: none;
+
+  resize: vertical;
+
+  font-size: 11.5px;
+  line-height: 1.55;
+}
+
+.agent-note-area textarea:focus {
+  border-color: rgba(32, 223, 255, 0.45);
+  box-shadow:
+    0 0 0 3px rgba(32, 223, 255, 0.045);
+}
+
+.agent-note-area textarea::placeholder {
+  color: #515d6b;
+}

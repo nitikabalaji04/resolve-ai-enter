@@ -3467,7 +3467,11 @@ export type Database = {
         Row: {
           action: string | null
           action_status: string | null
+          agent_email: string | null
+          agent_id: string | null
+          agent_note: string | null
           case_id: string
+          case_status: string | null
           created_at: string
           customer_id: string | null
           customer_message: string | null
@@ -3478,12 +3482,18 @@ export type Database = {
           order_id: string | null
           reason: string | null
           resolution_status: string | null
+          resolved_at: string | null
+          updated_at: string | null
           verification_status: string | null
         }
         Insert: {
           action?: string | null
           action_status?: string | null
+          agent_email?: string | null
+          agent_id?: string | null
+          agent_note?: string | null
           case_id: string
+          case_status?: string | null
           created_at?: string
           customer_id?: string | null
           customer_message?: string | null
@@ -3494,12 +3504,18 @@ export type Database = {
           order_id?: string | null
           reason?: string | null
           resolution_status?: string | null
+          resolved_at?: string | null
+          updated_at?: string | null
           verification_status?: string | null
         }
         Update: {
           action?: string | null
           action_status?: string | null
+          agent_email?: string | null
+          agent_id?: string | null
+          agent_note?: string | null
           case_id?: string
+          case_status?: string | null
           created_at?: string
           customer_id?: string | null
           customer_message?: string | null
@@ -3510,6 +3526,8 @@ export type Database = {
           order_id?: string | null
           reason?: string | null
           resolution_status?: string | null
+          resolved_at?: string | null
+          updated_at?: string | null
           verification_status?: string | null
         }
         Relationships: []
