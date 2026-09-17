@@ -1,0 +1,25 @@
+create table if not exists public.support_cases (
+  case_id text primary key,
+  customer_id text,
+  order_id text,
+  customer_message text,
+  intent text,
+  decision text,
+  reason text,
+  action text,
+  evidence jsonb default '[]'::jsonb,
+  action_status text,
+  verification_status text,
+  resolution_status text,
+  escalation_reason text,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists support_cases_customer_id_idx on public.support_cases (customer_id);
+create index if not exists support_cases_order_id_idx on public.support_cases (order_id);
+create index if not exists support_cases_created_at_idx on public.support_cases (created_at desc);
+
+alter table public.support_cases enable row level security;
+
+create policy "support_cases_select_authenticated" on public.support_cases
+  for select to authenticated using (true);

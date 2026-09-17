@@ -486,6 +486,40 @@ function buildCustomerResponse(
   };
 }
 
+// Persist the completed case so support history is kept in the database.
+// Persistence is best-effort: an error here is logged but must never break the
+// support response the customer receives.
+interface SupportCaseRecord {
+  case_id: string;
+  customer_id: string;
+  order_id: string;
+  customer_message: string;
+  intent: string;
+  decision: string;
+  reason: string;
+  action: string;
+  evidence: unknown[];
+  action_status: string;
+  verification_status: string;
+  resolution_status: string;
+  escalation_reason: string | null;
+}
+
+async function persistCaseRecord(
+  supabase: ReturnType<typeof createClient>,
+  record: SupportCaseRecord,
+): Promise<void> {
+  try {
+    const { error } = await supabase.from("support_cases").insert(record);
+
+    if (error) {
+      console.error("Failed to persist support case", error);
+    }
+  } catch (error) {
+    console.error("Failed to persist support case", error);
+  }
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
@@ -551,6 +585,22 @@ Deno.serve(async (req) => {
 
       const customerResponse = buildCustomerResponse(decision, investigation);
 
+      await persistCaseRecord(supabase, {
+        case_id: caseId,
+        customer_id: customerId,
+        order_id: orderId,
+        customer_message: message,
+        intent: decision.intent,
+        decision: decision.decision,
+        reason: decision.reason,
+        action: decision.action,
+        evidence: decision.evidence,
+        action_status: "not_required",
+        verification_status: "not_required",
+        resolution_status: customerResponse.status,
+        escalation_reason: escalationCase.escalation_reason,
+      });
+
       return json({
         case_id: caseId,
         customer_message: message,
@@ -590,6 +640,22 @@ Deno.serve(async (req) => {
       });
 
       const customerResponse = buildCustomerResponse(decision, investigation);
+
+      await persistCaseRecord(supabase, {
+        case_id: caseId,
+        customer_id: customerId,
+        order_id: orderId,
+        customer_message: message,
+        intent: typeof decision.intent === "string" ? decision.intent : "",
+        decision: decision.decision,
+        reason: decision.reason,
+        action: decision.action,
+        evidence: Array.isArray(decision.evidence) ? decision.evidence : [],
+        action_status: "not_required",
+        verification_status: "not_required",
+        resolution_status: customerResponse.status,
+        escalation_reason: escalationCase.escalation_reason,
+      });
 
       return json({
         case_id: caseId,
@@ -631,6 +697,22 @@ Deno.serve(async (req) => {
       });
 
       const customerResponse = buildCustomerResponse(decision, investigation);
+
+      await persistCaseRecord(supabase, {
+        case_id: caseId,
+        customer_id: customerId,
+        order_id: orderId,
+        customer_message: message,
+        intent: typeof decision.intent === "string" ? decision.intent : "",
+        decision: decision.decision,
+        reason: decision.reason,
+        action: decision.action,
+        evidence: Array.isArray(decision.evidence) ? decision.evidence : [],
+        action_status: "not_required",
+        verification_status: "not_required",
+        resolution_status: customerResponse.status,
+        escalation_reason: escalationCase.escalation_reason,
+      });
 
       return json({
         case_id: caseId,
@@ -675,7 +757,26 @@ Deno.serve(async (req) => {
       actionResult,
     );
 
-    // Step 14: final response
+    // Step 14: persist the case record and return the final response
+    await persistCaseRecord(supabase, {
+      case_id: caseId,
+      customer_id: customerId,
+      order_id: orderId,
+      customer_message: message,
+      intent: typeof decision.intent === "string" ? decision.intent : "",
+      decision: decision.decision,
+      reason: decision.reason,
+      action: decision.action,
+      evidence: Array.isArray(decision.evidence) ? decision.evidence : [],
+      action_status: actionStatus,
+      verification_status:
+        typeof verification.verification_status === "string"
+          ? verification.verification_status
+          : "failed",
+      resolution_status: customerResponse.status,
+      escalation_reason: null,
+    });
+
     return json({
       case_id: caseId,
       customer_message: message,

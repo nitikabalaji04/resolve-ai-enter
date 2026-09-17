@@ -3463,6 +3463,57 @@ export type Database = {
         }
         Relationships: []
       }
+      support_cases: {
+        Row: {
+          action: string | null
+          action_status: string | null
+          case_id: string
+          created_at: string
+          customer_id: string | null
+          customer_message: string | null
+          decision: string | null
+          escalation_reason: string | null
+          evidence: Json | null
+          intent: string | null
+          order_id: string | null
+          reason: string | null
+          resolution_status: string | null
+          verification_status: string | null
+        }
+        Insert: {
+          action?: string | null
+          action_status?: string | null
+          case_id: string
+          created_at?: string
+          customer_id?: string | null
+          customer_message?: string | null
+          decision?: string | null
+          escalation_reason?: string | null
+          evidence?: Json | null
+          intent?: string | null
+          order_id?: string | null
+          reason?: string | null
+          resolution_status?: string | null
+          verification_status?: string | null
+        }
+        Update: {
+          action?: string | null
+          action_status?: string | null
+          case_id?: string
+          created_at?: string
+          customer_id?: string | null
+          customer_message?: string | null
+          decision?: string | null
+          escalation_reason?: string | null
+          evidence?: Json | null
+          intent?: string | null
+          order_id?: string | null
+          reason?: string | null
+          resolution_status?: string | null
+          verification_status?: string | null
+        }
+        Relationships: []
+      }
       tickets: {
         Row: {
           created_date: string | null
