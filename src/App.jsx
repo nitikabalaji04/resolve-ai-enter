@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { supabase } from './integrations/supabase/client'
+import CaseManagement from './components/CaseManagement'
 import {
   LayoutDashboard,
   MessageCircle,
@@ -21,6 +22,7 @@ import {
   CreditCard,
   Brain,
   UserRound,
+  FolderOpen,
 } from 'lucide-react'
 
 function App() {
@@ -1550,6 +1552,10 @@ function App() {
 
   // IMPORTANT:
   // Call the render functions with ()
+  const renderCaseManagement = () => (
+    <CaseManagement />
+  )
+
   const renderPage = () => {
     switch (activePage) {
       case 'Customer Support':
@@ -1557,6 +1563,9 @@ function App() {
 
       case 'Investigations':
         return renderInvestigations()
+
+      case 'Case Management':
+        return renderCaseManagement()
 
       case 'Agent Dashboard':
         return renderAgentDashboard()
@@ -1642,6 +1651,21 @@ function App() {
 
             <span>
               Agent Dashboard
+            </span>
+          </button>
+
+          <button
+            className={`nav-item ${
+              activePage === 'Case Management'
+                ? 'active'
+                : ''
+            }`}
+            onClick={() => setActivePage('Case Management')}
+          >
+            <FolderOpen size={18} />
+
+            <span>
+              Case Management
             </span>
           </button>
         </nav>

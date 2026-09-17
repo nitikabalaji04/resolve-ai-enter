@@ -1,0 +1,2 @@
+create policy "support_cases_select_anon" on public.support_cases
+  for select to anon using (true);
