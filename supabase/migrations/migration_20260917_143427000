@@ -1,0 +1,56 @@
+create table if not exists public.customers (
+  customer_id text primary key,
+  name text not null,
+  email text,
+  phone text,
+  membership text,
+  total_orders integer default 0
+);
+
+create table if not exists public.orders (
+  order_id text primary key,
+  customer_id text references public.customers (customer_id),
+  product text,
+  order_date text,
+  expected_delivery text,
+  actual_delivery text,
+  status text,
+  delivery_days_delayed integer default 0,
+  shipping_type text,
+  amount numeric,
+  payment_status text,
+  refund_status text
+);
+
+create table if not exists public.tickets (
+  ticket_id text primary key,
+  customer_id text references public.customers (customer_id),
+  order_id text,
+  subject text,
+  message text,
+  status text,
+  created_date text,
+  priority text
+);
+
+create table if not exists public.policies (
+  policy_id bigint generated always as identity primary key,
+  policy_type text,
+  title text,
+  conditions jsonb default '[]'::jsonb,
+  action text
+);
+
+create index if not exists orders_customer_id_idx on public.orders (customer_id);
+create index if not exists tickets_customer_id_idx on public.tickets (customer_id);
+create index if not exists policies_policy_type_idx on public.policies (policy_type);
+
+alter table public.customers enable row level security;
+alter table public.orders enable row level security;
+alter table public.tickets enable row level security;
+alter table public.policies enable row level security;
+
+create policy "customers_select_authenticated" on public.customers for select to authenticated using (true);
+create policy "orders_select_authenticated" on public.orders for select to authenticated using (true);
+create policy "tickets_select_authenticated" on public.tickets for select to authenticated using (true);
+create policy "policies_select_authenticated" on public.policies for select to authenticated using (true);

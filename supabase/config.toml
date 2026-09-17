@@ -1,1 +1,4 @@
 project_id = "spb-t4ngq0ib2t3myygs"
+
+[functions.support]
+verify_jwt = true

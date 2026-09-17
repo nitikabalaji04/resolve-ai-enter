@@ -3360,7 +3360,149 @@ export type Database = {
   }
   public: {
     Tables: {
-      [_ in never]: never
+      customers: {
+        Row: {
+          customer_id: string
+          email: string | null
+          membership: string | null
+          name: string
+          phone: string | null
+          total_orders: number | null
+        }
+        Insert: {
+          customer_id: string
+          email?: string | null
+          membership?: string | null
+          name: string
+          phone?: string | null
+          total_orders?: number | null
+        }
+        Update: {
+          customer_id?: string
+          email?: string | null
+          membership?: string | null
+          name?: string
+          phone?: string | null
+          total_orders?: number | null
+        }
+        Relationships: []
+      }
+      orders: {
+        Row: {
+          actual_delivery: string | null
+          amount: number | null
+          customer_id: string | null
+          delivery_days_delayed: number | null
+          expected_delivery: string | null
+          order_date: string | null
+          order_id: string
+          payment_status: string | null
+          product: string | null
+          refund_status: string | null
+          shipping_type: string | null
+          status: string | null
+        }
+        Insert: {
+          actual_delivery?: string | null
+          amount?: number | null
+          customer_id?: string | null
+          delivery_days_delayed?: number | null
+          expected_delivery?: string | null
+          order_date?: string | null
+          order_id: string
+          payment_status?: string | null
+          product?: string | null
+          refund_status?: string | null
+          shipping_type?: string | null
+          status?: string | null
+        }
+        Update: {
+          actual_delivery?: string | null
+          amount?: number | null
+          customer_id?: string | null
+          delivery_days_delayed?: number | null
+          expected_delivery?: string | null
+          order_date?: string | null
+          order_id?: string
+          payment_status?: string | null
+          product?: string | null
+          refund_status?: string | null
+          shipping_type?: string | null
+          status?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "orders_customer_id_fkey"
+            columns: ["customer_id"]
+            referencedRelation: "customers"
+            referencedColumns: ["customer_id"]
+          },
+        ]
+      }
+      policies: {
+        Row: {
+          action: string | null
+          conditions: Json | null
+          policy_id: number
+          policy_type: string | null
+          title: string | null
+        }
+        Insert: {
+          action?: string | null
+          conditions?: Json | null
+          policy_id?: never
+          policy_type?: string | null
+          title?: string | null
+        }
+        Update: {
+          action?: string | null
+          conditions?: Json | null
+          policy_id?: never
+          policy_type?: string | null
+          title?: string | null
+        }
+        Relationships: []
+      }
+      tickets: {
+        Row: {
+          created_date: string | null
+          customer_id: string | null
+          message: string | null
+          order_id: string | null
+          priority: string | null
+          status: string | null
+          subject: string | null
+          ticket_id: string
+        }
+        Insert: {
+          created_date?: string | null
+          customer_id?: string | null
+          message?: string | null
+          order_id?: string | null
+          priority?: string | null
+          status?: string | null
+          subject?: string | null
+          ticket_id: string
+        }
+        Update: {
+          created_date?: string | null
+          customer_id?: string | null
+          message?: string | null
+          order_id?: string | null
+          priority?: string | null
+          status?: string | null
+          subject?: string | null
+          ticket_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "tickets_customer_id_fkey"
+            columns: ["customer_id"]
+            referencedRelation: "customers"
+            referencedColumns: ["customer_id"]
+          },
+        ]
+      }
     }
     Views: {
       [_ in never]: never

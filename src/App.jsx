@@ -449,17 +449,6 @@ function App() {
       'Your request has been forwarded to a human support specialist for further review.'
     )
 
-    const customer =
-      supportResult?.investigation?.customer ||
-      supportResult?.customer
-
-    const customerName =
-      customer?.name ||
-      customer?.customer_name ||
-      customer?.full_name ||
-      customer?.first_name ||
-      'Customer'
-
     const order = supportResult?.investigation?.order
 
     const orderId = order?.order_id || null
