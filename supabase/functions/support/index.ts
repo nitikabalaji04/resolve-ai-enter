@@ -499,7 +499,7 @@ function buildOrderStatusText(order: JsonObject): string {
 function buildCustomerResponse(
   decision: JsonObject,
   investigation: Investigation,
-  actionResult?: JsonObject,
+  requestedOrderId?: string,
 ): JsonObject {
   const order = investigation.order;
   const customer = investigation.customer;
@@ -540,11 +540,23 @@ function buildCustomerResponse(
   }
 
   if (decisionType === "escalate") {
+    // A request for an order that could not be verified must not claim a
+    // verified customer name: use neutral wording and reference the requested
+    // order number instead.
+    if (!order) {
+      return {
+        status: "escalated",
+        message: requestedOrderId
+          ? `Your request has been forwarded to a human support agent because order #${requestedOrderId} could not be verified.`
+          : "Your request has been forwarded to a human support agent because the order details could not be verified.",
+        details:
+          "We could not automatically resolve this request based on the available information and policy.",
+      };
+    }
+
     return {
       status: "escalated",
-      message: orderId
-        ? `Hi ${customerName}, your request for order #${orderId} has been forwarded to a human support agent.`
-        : `Hi ${customerName}, your request has been forwarded to a human support agent because the order details could not be verified.`,
+      message: `Hi ${customerName}, your request for order #${orderId} has been forwarded to a human support agent.`,
       details:
         "We could not automatically resolve this request based on the available information and policy.",
     };
@@ -561,11 +573,15 @@ function buildCustomerResponse(
     };
   }
 
+  // Unreachable fallback for unknown decision types: keep the escalation safe
+  // and neutral when the order could not be verified.
   return {
     status: "escalated",
     message: orderId
       ? `Hi ${customerName}, your request for order #${orderId} has been forwarded to a human support agent.`
-      : `Hi ${customerName}, your request has been forwarded to a human support agent because the order details could not be verified.`,
+      : requestedOrderId
+        ? `Your request has been forwarded to a human support agent because order #${requestedOrderId} could not be verified.`
+        : "Your request has been forwarded to a human support agent because the order details could not be verified.",
     details: "The request requires further review.",
   };
 }
@@ -688,7 +704,7 @@ Deno.serve(async (req) => {
         reason: "AI reasoning was unavailable.",
       });
 
-      const customerResponse = buildCustomerResponse(decision, investigation);
+      const customerResponse = buildCustomerResponse(decision, investigation, orderId);
 
       await persistCaseRecord(supabase, {
         case_id: caseId,
@@ -745,7 +761,7 @@ Deno.serve(async (req) => {
         reason: validation.reason,
       });
 
-      const customerResponse = buildCustomerResponse(decision, investigation);
+      const customerResponse = buildCustomerResponse(decision, investigation, orderId);
 
       await persistCaseRecord(supabase, {
         case_id: caseId,
@@ -803,7 +819,7 @@ Deno.serve(async (req) => {
             : "Human review is required.",
       });
 
-      const customerResponse = buildCustomerResponse(decision, investigation);
+      const customerResponse = buildCustomerResponse(decision, investigation, orderId);
 
       await persistCaseRecord(supabase, {
         case_id: caseId,
@@ -862,6 +878,7 @@ Deno.serve(async (req) => {
         const customerResponse = buildCustomerResponse(
           escalatedDecision,
           investigation,
+          orderId,
         );
 
         await persistCaseRecord(supabase, {
@@ -898,7 +915,7 @@ Deno.serve(async (req) => {
         });
       }
 
-      const customerResponse = buildCustomerResponse(decision, investigation);
+      const customerResponse = buildCustomerResponse(decision, investigation, orderId);
 
       await persistCaseRecord(supabase, {
         case_id: caseId,
@@ -956,7 +973,7 @@ Deno.serve(async (req) => {
     const customerResponse = buildCustomerResponse(
       decision,
       investigation,
-      actionResult,
+      orderId,
     );
 
     // Step 14: persist the case record and return the final response
