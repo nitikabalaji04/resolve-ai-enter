@@ -20,11 +20,13 @@ import {
 } from 'lucide-react'
 
 // Deterministically extracts an explicitly mentioned order number from a
-// customer message. Recognizes "order 10486", "order #10486", "order number
-// 10486", "my order 10486", "order no. 10486" and "order no 10486". Returns
-// null when the message does not clearly reference an order identifier, so
-// arbitrary numbers (prices, dates, phone numbers) are never extracted.
-const EXPLICIT_ORDER_PATTERN = /\border\s*(?:number|no\.?|#)?\s*(\d{4,})\b/i
+// customer message. Recognizes "order 552", "order #123456", "order number
+// 777777", "my order 10486", "order no. 888888" and "order no 552" for ANY
+// digit length. The "order" keyword association is what disambiguates it:
+// returns null when the message does not clearly reference an order
+// identifier, so arbitrary numbers (prices, dates, phone numbers) are never
+// extracted.
+const EXPLICIT_ORDER_PATTERN = /\border\s*(?:number|no\.?|#)?\s*(\d+)\b/i
 
 function extractOrderId(message) {
   const match = EXPLICIT_ORDER_PATTERN.exec(message || '')

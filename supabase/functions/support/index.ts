@@ -28,6 +28,7 @@ interface Investigation {
   order: JsonObject | null;
   ticket_history: JsonObject[];
   policy: JsonObject | null;
+  customer_id: string | null;
 }
 
 function json(payload: unknown, status = 200): Response {
@@ -46,17 +47,45 @@ function asObject(value: unknown): JsonObject {
 // Step 1: investigate the customer's case
 async function investigate(
   supabase: ReturnType<typeof createClient>,
-  customerId: string,
   orderId: string,
 ): Promise<Investigation> {
-  const [customerRes, orderRes, ticketsRes, policyRes] = await Promise.all([
-    supabase.from("customers").select("*").eq("customer_id", customerId).maybeSingle(),
-    supabase.from("orders").select("*").eq("order_id", orderId).maybeSingle(),
-    supabase
-      .from("tickets")
-      .select("*")
-      .eq("customer_id", customerId)
-      .order("created_date", { ascending: true }),
+  // The order is the source of truth. When the requested order exists, the
+  // customer context is the order's owner. When it does not exist, no customer
+  // may be attached to the case: a default/demo customer must never be paired
+  // with an unverifiable order to manufacture a match.
+  const orderRes = await supabase
+    .from("orders")
+    .select("*")
+    .eq("order_id", orderId)
+    .maybeSingle();
+
+  if (orderRes.error) {
+    console.error("investigate query error", orderRes.error);
+    throw new Error(orderRes.error.message);
+  }
+
+  const order = (orderRes.data as JsonObject) ?? null;
+
+  const resolvedCustomerId =
+    order && typeof order.customer_id === "string"
+      ? order.customer_id
+      : null;
+
+  const [customerRes, ticketsRes, policyRes] = await Promise.all([
+    resolvedCustomerId
+      ? supabase
+          .from("customers")
+          .select("*")
+          .eq("customer_id", resolvedCustomerId)
+          .maybeSingle()
+      : Promise.resolve({ data: null, error: null }),
+    resolvedCustomerId
+      ? supabase
+          .from("tickets")
+          .select("*")
+          .eq("customer_id", resolvedCustomerId)
+          .order("created_date", { ascending: true })
+      : Promise.resolve({ data: [], error: null }),
     supabase
       .from("policies")
       .select("*")
@@ -66,7 +95,7 @@ async function investigate(
       .maybeSingle(),
   ]);
 
-  for (const res of [customerRes, orderRes, ticketsRes, policyRes]) {
+  for (const res of [customerRes, ticketsRes, policyRes]) {
     if (res.error) {
       console.error("investigate query error", res.error);
       throw new Error(res.error.message);
@@ -75,9 +104,10 @@ async function investigate(
 
   return {
     customer: (customerRes.data as JsonObject) ?? null,
-    order: (orderRes.data as JsonObject) ?? null,
+    order,
     ticket_history: (ticketsRes.data as JsonObject[]) ?? [],
     policy: (policyRes.data as JsonObject) ?? null,
+    customer_id: resolvedCustomerId,
   };
 }
 
@@ -591,7 +621,7 @@ function buildCustomerResponse(
 // support response the customer receives.
 interface SupportCaseRecord {
   case_id: string;
-  customer_id: string;
+  customer_id: string | null;
   order_id: string;
   customer_message: string;
   intent: string;
@@ -651,35 +681,16 @@ Deno.serve(async (req) => {
       );
     }
 
-    let customerId = body.customer_id.trim();
     const orderId = body.order_id.trim();
     const message = body.message;
-
-    // Authoritative order/customer resolution: when the requested order exists,
-    // the customer context is taken from the order's owner so the investigation
-    // is always coherent. This guarantees that an explicitly mentioned order is
-    // never investigated against a different customer's context (for example a
-    // hard-coded demo customer). Existing flows are unaffected because their
-    // sent customer already matches the order owner.
-    const orderLookup = await supabase
-      .from("orders")
-      .select("customer_id")
-      .eq("order_id", orderId)
-      .maybeSingle();
-
-    if (orderLookup.error) {
-      throw new Error(orderLookup.error.message);
-    }
-
-    if (orderLookup.data && typeof orderLookup.data.customer_id === "string") {
-      customerId = orderLookup.data.customer_id;
-    }
 
     // Generate a unique case ID for every support request
     const caseId = `CASE-${crypto.randomUUID().replace(/-/g, "").slice(0, 8).toUpperCase()}`;
 
-    // Step 1: investigate the customer's case
-    const investigation = await investigate(supabase, customerId, orderId);
+    // Step 1: investigate the customer's case.
+    // The order is authoritative: the customer context is resolved from the
+    // order's owner, and a nonexistent order never gets a customer attached.
+    const investigation = await investigate(supabase, orderId);
 
     // Step 2: build the Qwen reasoning prompt
     const qwenPrompt = buildQwenPrompt(message, investigation);
@@ -708,7 +719,7 @@ Deno.serve(async (req) => {
 
       await persistCaseRecord(supabase, {
         case_id: caseId,
-        customer_id: customerId,
+        customer_id: investigation.customer_id,
         order_id: orderId,
         customer_message: message,
         intent: decision.intent,
@@ -765,7 +776,7 @@ Deno.serve(async (req) => {
 
       await persistCaseRecord(supabase, {
         case_id: caseId,
-        customer_id: customerId,
+        customer_id: investigation.customer_id,
         order_id: orderId,
         customer_message: message,
         intent: typeof decision.intent === "string" ? decision.intent : "",
@@ -823,7 +834,7 @@ Deno.serve(async (req) => {
 
       await persistCaseRecord(supabase, {
         case_id: caseId,
-        customer_id: customerId,
+        customer_id: investigation.customer_id,
         order_id: orderId,
         customer_message: message,
         intent: typeof decision.intent === "string" ? decision.intent : "",
@@ -883,7 +894,7 @@ Deno.serve(async (req) => {
 
         await persistCaseRecord(supabase, {
           case_id: caseId,
-          customer_id: customerId,
+          customer_id: investigation.customer_id,
           order_id: orderId,
           customer_message: message,
           intent:
@@ -919,7 +930,7 @@ Deno.serve(async (req) => {
 
       await persistCaseRecord(supabase, {
         case_id: caseId,
-        customer_id: customerId,
+        customer_id: investigation.customer_id,
         order_id: orderId,
         customer_message: message,
         intent: typeof decision.intent === "string" ? decision.intent : "",
@@ -979,7 +990,7 @@ Deno.serve(async (req) => {
     // Step 14: persist the case record and return the final response
     await persistCaseRecord(supabase, {
       case_id: caseId,
-      customer_id: customerId,
+      customer_id: investigation.customer_id,
       order_id: orderId,
       customer_message: message,
       intent: typeof decision.intent === "string" ? decision.intent : "",
