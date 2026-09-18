@@ -19,6 +19,19 @@ import {
   LogOut,
 } from 'lucide-react'
 
+// Deterministically extracts an explicitly mentioned order number from a
+// customer message. Recognizes "order 10486", "order #10486", "order number
+// 10486", "my order 10486", "order no. 10486" and "order no 10486". Returns
+// null when the message does not clearly reference an order identifier, so
+// arbitrary numbers (prices, dates, phone numbers) are never extracted.
+const EXPLICIT_ORDER_PATTERN = /\border\s*(?:number|no\.?|#)?\s*(\d{4,})\b/i
+
+function extractOrderId(message) {
+  const match = EXPLICIT_ORDER_PATTERN.exec(message || '')
+
+  return match ? match[1] : null
+}
+
 function App() {
   const [activePage, setActivePage] = useState('Dashboard')
   const [complaint, setComplaint] = useState('')
@@ -160,6 +173,17 @@ function App() {
       ) {
         customerId = 'CUST002'
         orderId = '10483'
+      }
+
+      // Deterministic explicit-order extraction: if the customer mentions an
+      // order number in their message, that exact order MUST be investigated.
+      // An explicitly mentioned order always wins over any default/special-case
+      // order context above. If the order does not exist, the backend receives
+      // that order ID and safely escalates instead of substituting another.
+      const explicitOrderId = extractOrderId(userComplaint)
+
+      if (explicitOrderId) {
+        orderId = explicitOrderId
       }
 
       const { data, error } = await supabase.functions.invoke(

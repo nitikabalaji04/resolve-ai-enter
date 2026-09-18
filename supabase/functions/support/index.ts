@@ -635,9 +635,29 @@ Deno.serve(async (req) => {
       );
     }
 
-    const customerId = body.customer_id.trim();
+    let customerId = body.customer_id.trim();
     const orderId = body.order_id.trim();
     const message = body.message;
+
+    // Authoritative order/customer resolution: when the requested order exists,
+    // the customer context is taken from the order's owner so the investigation
+    // is always coherent. This guarantees that an explicitly mentioned order is
+    // never investigated against a different customer's context (for example a
+    // hard-coded demo customer). Existing flows are unaffected because their
+    // sent customer already matches the order owner.
+    const orderLookup = await supabase
+      .from("orders")
+      .select("customer_id")
+      .eq("order_id", orderId)
+      .maybeSingle();
+
+    if (orderLookup.error) {
+      throw new Error(orderLookup.error.message);
+    }
+
+    if (orderLookup.data && typeof orderLookup.data.customer_id === "string") {
+      customerId = orderLookup.data.customer_id;
+    }
 
     // Generate a unique case ID for every support request
     const caseId = `CASE-${crypto.randomUUID().replace(/-/g, "").slice(0, 8).toUpperCase()}`;
