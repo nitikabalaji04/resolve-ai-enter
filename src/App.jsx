@@ -43,6 +43,8 @@ function App() {
   const [supportResult, setSupportResult] = useState(null)
   const [session, setSession] = useState(null)
   const [sessionLoading, setSessionLoading] = useState(true)
+  const [isAgent, setIsAgent] = useState(false)
+  const [agentCheckDone, setAgentCheckDone] = useState(false)
 
   useEffect(() => {
     // Register the listener BEFORE checking for an existing session.
@@ -61,6 +63,54 @@ function App() {
       listener.subscription.unsubscribe()
     }
   }, [])
+
+  // Authorize the signed-in user as a support agent. Only authenticated users
+  // with an active agent_profiles row (role agent/admin) may access agent
+  // functionality. RLS enforces the same rule server-side, so this check can
+  // never be bypassed from the frontend.
+  useEffect(() => {
+    let cancelled = false
+
+    const check = async () => {
+      const userId = session?.user?.id
+
+      if (!userId) {
+        if (!cancelled) {
+          setIsAgent(false)
+          setAgentCheckDone(true)
+        }
+        return
+      }
+
+      try {
+        const { data } = await supabase
+          .from('agent_profiles')
+          .select('role')
+          .eq('user_id', userId)
+          .eq('active', true)
+          .maybeSingle()
+
+        if (!cancelled) {
+          setIsAgent(Boolean(data))
+          setAgentCheckDone(true)
+        }
+      } catch (err) {
+        // Fail closed: any error while reading the agent profile denies access.
+        console.error('Agent authorization check failed:', err)
+
+        if (!cancelled) {
+          setIsAgent(false)
+          setAgentCheckDone(true)
+        }
+      }
+    }
+
+    check()
+
+    return () => {
+      cancelled = true
+    }
+  }, [session?.user?.id])
 
   // Safely convert backend values into text
   const safeText = (value, fallback = '') => {
@@ -756,9 +806,10 @@ function App() {
 
   // Case Management and the Agent Dashboard are Human Agent areas.
   // Show a session check while restoring the session, the login screen when
-  // signed out, and the page only when an agent is authenticated.
+  // signed out, a denial panel for authenticated users who are not approved
+  // support agents, and the page only for authorized agents.
   const renderAgentGate = (renderFn) => {
-    if (sessionLoading) {
+    if (sessionLoading || !agentCheckDone) {
       return (
         <div className="session-check">
           <p>Checking session...</p>
@@ -768,6 +819,24 @@ function App() {
 
     if (!session) {
       return <AgentLogin />
+    }
+
+    if (!isAgent) {
+      return (
+        <div className="not-authorized">
+          <ShieldCheck size={22} />
+
+          <strong>
+            Your account is not authorized as a support agent.
+          </strong>
+
+          <p>
+            Only approved support agents can access Case Management and
+            the Agent Dashboard. Contact your administrator if you
+            believe this is a mistake.
+          </p>
+        </div>
+      )
     }
 
     return renderFn()

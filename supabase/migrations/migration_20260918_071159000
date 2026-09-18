@@ -1,0 +1,30 @@
+drop policy if exists customers_select_authenticated on public.customers;
+create policy customers_select_authenticated
+  on public.customers for select to authenticated
+  using (exists (select 1 from public.agent_profiles ap where ap.user_id = auth.uid() and ap.active = true and ap.role in ('agent','admin')));
+
+drop policy if exists orders_select_authenticated on public.orders;
+create policy orders_select_authenticated
+  on public.orders for select to authenticated
+  using (exists (select 1 from public.agent_profiles ap where ap.user_id = auth.uid() and ap.active = true and ap.role in ('agent','admin')));
+
+drop policy if exists tickets_select_authenticated on public.tickets;
+create policy tickets_select_authenticated
+  on public.tickets for select to authenticated
+  using (exists (select 1 from public.agent_profiles ap where ap.user_id = auth.uid() and ap.active = true and ap.role in ('agent','admin')));
+
+drop policy if exists policies_select_authenticated on public.policies;
+create policy policies_select_authenticated
+  on public.policies for select to authenticated
+  using (exists (select 1 from public.agent_profiles ap where ap.user_id = auth.uid() and ap.active = true and ap.role in ('agent','admin')));
+
+drop policy if exists support_cases_select_authenticated on public.support_cases;
+create policy support_cases_select_authenticated
+  on public.support_cases for select to authenticated
+  using (exists (select 1 from public.agent_profiles ap where ap.user_id = auth.uid() and ap.active = true and ap.role in ('agent','admin')));
+
+drop policy if exists support_cases_update_authenticated on public.support_cases;
+create policy support_cases_update_authenticated
+  on public.support_cases for update to authenticated
+  using (exists (select 1 from public.agent_profiles ap where ap.user_id = auth.uid() and ap.active = true and ap.role in ('agent','admin')))
+  with check (exists (select 1 from public.agent_profiles ap where ap.user_id = auth.uid() and ap.active = true and ap.role in ('agent','admin')));

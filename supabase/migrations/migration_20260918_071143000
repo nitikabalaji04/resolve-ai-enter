@@ -1,0 +1,18 @@
+create table public.agent_profiles (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null unique references auth.users(id) on delete cascade,
+  email text not null unique,
+  role text not null default 'agent' check (role in ('agent','admin')),
+  active boolean not null default true,
+  created_at timestamptz not null default now()
+);
+
+alter table public.agent_profiles enable row level security;
+
+create policy agent_profiles_select_authenticated
+  on public.agent_profiles for select to authenticated
+  using (auth.uid() = user_id);
+
+insert into public.agent_profiles (user_id, email, role, active)
+values ('dbb6fb2c-950d-4933-a4b6-2ea72f6db0bf', 'nitikabalaji04@gmail.com', 'agent', true)
+on conflict (email) do nothing;

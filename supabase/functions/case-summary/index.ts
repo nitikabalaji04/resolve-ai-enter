@@ -158,6 +158,24 @@ Deno.serve(async (req) => {
       return json({ error: "Authentication required." }, 401);
     }
 
+    // Authorization: only active approved support agents may request a
+    // summary. The service-role client reads agent_profiles; the same rule is
+    // enforced in RLS for direct data access.
+    const { data: agentProfile, error: profileError } = await supabase
+      .from("agent_profiles")
+      .select("id")
+      .eq("user_id", userData.user.id)
+      .eq("active", true)
+      .in("role", ["agent", "admin"])
+      .maybeSingle();
+
+    if (profileError || !agentProfile) {
+      return json(
+        { error: "Your account is not authorized as a support agent." },
+        403,
+      );
+    }
+
     const body = (await req.json()) as { case?: unknown };
     const caseData = body?.case;
 

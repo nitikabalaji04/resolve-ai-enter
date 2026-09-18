@@ -3941,3 +3941,120 @@ button {
 
   white-space: nowrap;
 }
+
+/* ================================
+   AGENT NOT-AUTHORIZED PANEL
+================================ */
+
+.not-authorized {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+
+  gap: 10px;
+
+  min-height: 320px;
+  padding: 30px;
+
+  text-align: center;
+
+  border: 1px dashed rgba(240, 138, 138, 0.35);
+  border-radius: 12px;
+
+  background: rgba(240, 138, 138, 0.05);
+}
+
+.not-authorized svg {
+  color: #f08a8a;
+}
+
+.not-authorized strong {
+  color: #e7edf4;
+
+  font-size: 15px;
+}
+
+.not-authorized p {
+  max-width: 380px;
+
+  color: #8a97a6;
+
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+/* ================================
+   CASE MANAGEMENT SUMMARY VIEW
+================================ */
+
+.case-summary {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+
+  gap: 12px;
+
+  padding: 20px;
+
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.case-summary-field {
+  display: flex;
+  flex-direction: column;
+
+  gap: 5px;
+
+  min-width: 0;
+}
+
+.case-summary-field.full {
+  grid-column: 1 / -1;
+}
+
+.case-summary-field > span {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+
+  color: #657180;
+}
+
+.case-summary-field > strong {
+  font-size: 13px;
+  font-weight: 650;
+
+  color: #eef3f8;
+  line-height: 1.45;
+
+  overflow-wrap: break-word;
+}
+
+.case-details-toggle {
+  display: inline-flex;
+  align-items: center;
+
+  gap: 7px;
+
+  margin: 16px 0 4px;
+  padding: 8px 14px;
+
+  color: #20dfff;
+  background: rgba(34, 211, 238, 0.07);
+
+  border: 1px solid rgba(34, 211, 238, 0.2);
+  border-radius: 8px;
+
+  font-size: 11px;
+  font-weight: 650;
+
+  cursor: pointer;
+}
+
+.case-details-toggle:hover {
+  background: rgba(34, 211, 238, 0.12);
+}

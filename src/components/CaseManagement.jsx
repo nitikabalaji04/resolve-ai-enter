@@ -33,6 +33,17 @@ function formatDate(value) {
   return date.toLocaleString()
 }
 
+// Human-readable labels for the action field shown in the case summary.
+const ACTION_LABELS = {
+  refund_shipping_fee: 'Refund Shipping Fee',
+  human_review: 'Human Review',
+  no_action: 'No Action',
+}
+
+function actionLabel(value) {
+  return ACTION_LABELS[value] || value || '—'
+}
+
 async function fetchCases() {
   const { data, error } = await supabase
     .from('support_cases')
@@ -206,6 +217,7 @@ export default function CaseManagement({ user }) {
   const [actionNotice, setActionNotice] = useState(null)
   const [summaries, setSummaries] = useState({})
   const summaryInFlight = useRef(new Set())
+  const [showDetails, setShowDetails] = useState(false)
   const [contextState, setContextState] = useState({
     caseId: null,
     customer: null,
@@ -317,6 +329,21 @@ export default function CaseManagement({ user }) {
   // normal React re-renders never trigger duplicate Qwen calls).
   const needsSummary =
     selectedCase?.resolution_status === 'escalated'
+
+  // Brief default-view values. The full customer/order context stays under
+  // "View Details".
+  const summaryCustomerName =
+    caseContext?.customer?.name ||
+    selectedCase?.customer_id ||
+    'Not available'
+
+  const summaryIssue = (() => {
+    const message = (selectedCase?.customer_message || '').trim()
+
+    if (!message) return 'No customer message'
+
+    return message.length > 80 ? `${message.slice(0, 80)}…` : message
+  })()
 
   useEffect(() => {
     if (!needsSummary || !selectedCase) return
@@ -735,6 +762,68 @@ export default function CaseManagement({ user }) {
               </div>
 
               <div className="case-detail-body">
+                <div className="case-summary">
+                  <div className="case-summary-field">
+                    <span>Customer</span>
+
+                    <strong>{summaryCustomerName}</strong>
+                  </div>
+
+                  <div className="case-summary-field">
+                    <span>Order</span>
+
+                    <strong>
+                      {selectedCase.order_id
+                        ? `#${selectedCase.order_id}`
+                        : 'Not available'}
+                    </strong>
+                  </div>
+
+                  <div className="case-summary-field full">
+                    <span>Issue</span>
+
+                    <strong>{summaryIssue}</strong>
+                  </div>
+
+                  <div className="case-summary-field">
+                    <span>AI Decision</span>
+
+                    <strong>
+                      {(selectedCase.decision || '—').toUpperCase()}
+                    </strong>
+                  </div>
+
+                  <div className="case-summary-field">
+                    <span>Action</span>
+
+                    <strong>{actionLabel(selectedCase.action)}</strong>
+                  </div>
+
+                  <div className="case-summary-field full">
+                    <span>Reason</span>
+
+                    <strong>{selectedCase.reason || '—'}</strong>
+                  </div>
+
+                  <div className="case-summary-field">
+                    <span>Status</span>
+
+                    <strong>{statusBadge(selectedCase.resolution_status)}</strong>
+                  </div>
+                </div>
+
+                {selectedCase.case_status && renderAgentActions()}
+
+                <button
+                  type="button"
+                  className="case-details-toggle"
+                  onClick={() => setShowDetails((v) => !v)}
+                >
+                  {showDetails ? 'Hide Details' : 'View Details'}
+                </button>
+
+                {showDetails && (
+                  <>
                 {needsSummary && (
                   <div className="case-detail-section full">
                     <span className="case-detail-label">
@@ -814,30 +903,6 @@ export default function CaseManagement({ user }) {
                   </p>
                 </div>
 
-                <div className="case-detail-field">
-                  <span className="case-detail-label">AI DECISION</span>
-
-                  <p className="case-detail-text">
-                    {selectedCase.decision || '—'}
-                  </p>
-                </div>
-
-                <div className="case-detail-field">
-                  <span className="case-detail-label">ACTION</span>
-
-                  <p className="case-detail-text">
-                    {selectedCase.action || '—'}
-                  </p>
-                </div>
-
-                <div className="case-detail-field full">
-                  <span className="case-detail-label">REASON</span>
-
-                  <p className="case-detail-text">
-                    {selectedCase.reason || '—'}
-                  </p>
-                </div>
-
                 <div className="case-detail-field full">
                   <span className="case-detail-label">EVIDENCE</span>
 
@@ -910,8 +975,6 @@ export default function CaseManagement({ user }) {
                     {selectedCase.escalation_reason || 'Not escalated — no escalation reason.'}
                   </p>
                 </div>
-
-                {selectedCase.case_status && renderAgentActions()}
 
                 <div className="case-detail-section full">
                   <span className="case-detail-label">
@@ -1127,6 +1190,8 @@ export default function CaseManagement({ user }) {
                     Back to list
                   </button>
                 </div>
+                  </>
+                )}
               </div>
             </>
           )}

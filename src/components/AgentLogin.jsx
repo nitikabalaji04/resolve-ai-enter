@@ -42,7 +42,9 @@ export default function AgentLogin() {
 
         if (error) throw error
 
-        setNotice('Account created. You are now signed in as a Human Agent.')
+        setNotice(
+          'Account created. Only approved support agents can sign in.'
+        )
       }
     } catch (err) {
       setError(
