@@ -4058,3 +4058,167 @@ button {
 .case-details-toggle:hover {
   background: rgba(34, 211, 238, 0.12);
 }
+
+/* ================================
+   POLISH PASS (HackBriven demo)
+================================ */
+
+/* Theme tokens used by the Human-Agent UI were referenced but never defined,
+   so those borders/colors were silently dropped. Defining them here activates
+   the intended design and makes every screen share one visual language. */
+:root {
+  --accent: #20dfff;
+  --text: #e8eef3;
+  --muted: #6c7887;
+  --border: #1e2731;
+}
+
+/* AI Investigation steps: keep waiting quiet but readable */
+.investigation-steps::before {
+  background: #26323e;
+}
+
+.step {
+  opacity: 0.62;
+}
+
+.step > span {
+  color: #7b8896;
+  border-color: #2f3b48;
+}
+
+.step strong {
+  color: #93a1ae;
+}
+
+.step p {
+  color: #6d7988;
+}
+
+.step.pending {
+  opacity: 0.62;
+}
+
+.step.pending strong {
+  color: #93a1ae;
+}
+
+.step.pending p {
+  color: #6d7988;
+}
+
+.step.active p {
+  color: #9ba7b4;
+}
+
+.step.completed p {
+  color: #7c8a99;
+}
+
+/* Secondary metadata readability */
+.activity-item small {
+  color: #6b7786;
+}
+
+.system-status small {
+  color: #697585;
+}
+
+.topbar p {
+  color: #6f7b89;
+}
+
+.page-heading p {
+  color: #788492;
+}
+
+.case-info span {
+  color: #758291;
+}
+
+.case-list-meta {
+  color: #768392;
+}
+
+.case-list-message {
+  color: #98a5b3;
+}
+
+.case-ticket-meta {
+  color: #768392;
+}
+
+.case-context-field-label {
+  color: #7a8796;
+}
+
+.case-ticket-item p,
+.case-policy-conditions,
+.agent-case-note p {
+  color: #a5b6c6;
+}
+
+.resolution-status span {
+  color: #6d7a88;
+}
+
+.decision-flow span {
+  color: #7f8c9a;
+}
+
+.empty-state p {
+  color: #6e7a88;
+}
+
+.empty-state svg {
+  color: #596675;
+}
+
+.chat-input-area input::placeholder,
+.support-input input::placeholder,
+.support-input textarea::placeholder,
+.agent-note-area textarea::placeholder {
+  color: #5e6b79;
+}
+
+/* Investigations table: headers, IDs, active rows */
+.case-table th {
+  color: #7f8d9e;
+}
+
+.stage-text {
+  color: #adc0d2;
+}
+
+.case-id-button {
+  letter-spacing: 0.02em;
+}
+
+.case-table tbody tr:hover {
+  background: rgba(0, 200, 255, 0.045);
+}
+
+/* Status badges: consistent size and pill shape */
+.panel-badge,
+.investigating-badge {
+  padding: 6px 10px;
+  border-radius: 999px;
+  font-size: 8px;
+}
+
+.decision-status {
+  padding: 6px 10px;
+  border-radius: 999px;
+}
+
+.case-ticket-status {
+  padding: 5px 10px;
+  font-size: 8px;
+}
+
+/* Buttons: consistent height for the secondary/agent actions */
+.case-refresh-btn,
+.agent-action-btn,
+.logout-btn {
+  min-height: 34px;
+}
