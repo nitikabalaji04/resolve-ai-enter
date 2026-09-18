@@ -14,7 +14,7 @@
     "lucide-react": "^1.45.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
-    "vite-plugin-enter-dev": "^0.0.15"
+    "vite-plugin-enter-dev": "^0.0.16"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
