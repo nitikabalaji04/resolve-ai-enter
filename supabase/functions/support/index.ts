@@ -1840,6 +1840,314 @@ function evaluateDecisionGate(input) {
 // <<< DECISION GATE PURE LOGIC
 
 // ======================================================================
+// DECISION AGENT (Phase 7)
+// ======================================================================
+//
+// A structured, evidence-grounded decision-making layer. It proposes ONE
+// business decision from the FINAL investigation state and never acts on it:
+// no database writes, no refunds, no escalations, no action execution.
+//
+// The proposal is validated deterministically before it is accepted, and the
+// Decision Gate has the final say — a blocked investigation gets no automated
+// decision at all. The LLM call reuses the existing askQwen helper.
+
+// >>> DECISION AGENT PURE LOGIC (plain JS — extracted verbatim by decision-agent.test.mjs)
+const DECISION_AGENT_NAME = "decision_agent";
+
+const DECISION_AGENT_DECISIONS = ["APPROVE", "DENY", "INFORM", "ESCALATE"];
+const DECISION_AGENT_ACTIONS = [
+  "REFUND_SHIPPING_FEE",
+  "NO_ACTION",
+  "ESCALATE_TO_HUMAN",
+];
+
+// The only decision/action pairings the existing system supports.
+const DECISION_ACTION_MAP = {
+  APPROVE: ["REFUND_SHIPPING_FEE"],
+  DENY: ["NO_ACTION"],
+  INFORM: ["NO_ACTION"],
+  ESCALATE: ["ESCALATE_TO_HUMAN"],
+};
+
+// Decisions that act on the customer's request without a human, so they must
+// cite supporting evidence.
+const EVIDENCE_REQUIRED_DECISIONS = ["APPROVE", "DENY", "INFORM"];
+
+// A blocked investigation must never receive an automated decision.
+function blockedDecisionAgentResult(gate) {
+  if (gate && typeof gate === "object" && gate.status === "BLOCK") {
+    return {
+      agent: DECISION_AGENT_NAME,
+      status: "blocked",
+      reason: "DECISION_GATE_BLOCKED",
+    };
+  }
+
+  return null;
+}
+
+// Maps a failed/unavailable LLM call to a deterministic failure result.
+function decisionAgentLlmFailure(llmResult) {
+  const result = llmResult || {};
+
+  if (result.status === "success") return null;
+
+  return {
+    agent: DECISION_AGENT_NAME,
+    status: "failed",
+    reason: "LLM_UNAVAILABLE",
+  };
+}
+
+// Strict, deterministic validation of the model's proposed decision. Pure: no
+// database, no LLM, never throws, never mutates its input.
+function validateDecisionAgentOutput(input) {
+  const src = input || {};
+  const output = src.output;
+  const evidence = Array.isArray(src.evidence) ? src.evidence : [];
+  const plan = Array.isArray(src.plan) ? src.plan : [];
+  const order =
+    src.order && typeof src.order === "object" && !Array.isArray(src.order)
+      ? src.order
+      : null;
+  const gate = src.gate && typeof src.gate === "object" ? src.gate : null;
+
+  const fail = (reason) => ({ valid: false, reason });
+
+  if (!output || typeof output !== "object" || Array.isArray(output)) {
+    return fail("INVALID_MODEL_OUTPUT");
+  }
+
+  const decision =
+    typeof output.decision === "string" ? output.decision.trim().toUpperCase() : "";
+
+  if (!DECISION_AGENT_DECISIONS.includes(decision)) {
+    return fail("INVALID_DECISION");
+  }
+
+  const action =
+    typeof output.action === "string" ? output.action.trim().toUpperCase() : "";
+
+  if (!DECISION_AGENT_ACTIONS.includes(action)) {
+    return fail("INVALID_ACTION");
+  }
+
+  const allowedActions = DECISION_ACTION_MAP[decision] || [];
+
+  if (!allowedActions.includes(action)) {
+    return fail("INVALID_ACTION");
+  }
+
+  // Defence in depth: the gate also blocks automated decisions here.
+  if (gate && gate.status === "BLOCK") {
+    return fail("DECISION_GATE_BLOCKED");
+  }
+
+  if (
+    typeof output.confidence !== "number" ||
+    !Number.isFinite(output.confidence) ||
+    output.confidence < 0 ||
+    output.confidence > 1
+  ) {
+    return fail("INVALID_CONFIDENCE");
+  }
+
+  const reasoning =
+    typeof output.reasoning === "string" ? output.reasoning.trim() : "";
+
+  if (reasoning === "") {
+    return fail("EMPTY_REASONING");
+  }
+
+  if (!Array.isArray(output.evidence_ids)) {
+    return fail("INVALID_EVIDENCE_IDS");
+  }
+
+  const knownIds = [];
+
+  for (const item of evidence) {
+    if (item && typeof item.id === "string" && !knownIds.includes(item.id)) {
+      knownIds.push(item.id);
+    }
+  }
+
+  const cited = [];
+
+  for (const rawId of output.evidence_ids) {
+    if (typeof rawId !== "string" || rawId.trim() === "") {
+      return fail("INVALID_EVIDENCE_IDS");
+    }
+
+    const id = rawId.trim();
+
+    // The agent may never invent evidence.
+    if (!knownIds.includes(id)) {
+      return fail("UNKNOWN_EVIDENCE_ID");
+    }
+
+    if (!cited.includes(id)) cited.push(id);
+  }
+
+  if (cited.length === 0 && EVIDENCE_REQUIRED_DECISIONS.includes(decision)) {
+    return fail("MISSING_EVIDENCE_IDS");
+  }
+
+  // Safety: never authorise a second refund for an order already refunded.
+  if (action === "REFUND_SHIPPING_FEE" && order && order.refund_status === "initiated") {
+    return fail("ACTION_ALREADY_COMPLETED");
+  }
+
+  // Safety: a refund must be supported by policy evidence when policy is planned.
+  if (action === "REFUND_SHIPPING_FEE") {
+    const planRequiresPolicy = plan.some(function (domain) {
+      return typeof domain === "string" && domain.trim().toLowerCase() === "policy";
+    });
+
+    if (planRequiresPolicy) {
+      const policyEvidence = evidence.filter(function (item) {
+        return item && typeof item === "object" && item.domain === "policy";
+      });
+      const citesPolicy = cited.some(function (id) {
+        return policyEvidence.some(function (item) {
+          return item.id === id;
+        });
+      });
+
+      if (policyEvidence.length === 0 || !citesPolicy) {
+        return fail("POLICY_EVIDENCE_REQUIRED");
+      }
+    }
+  }
+
+  return {
+    valid: true,
+    decision,
+    action,
+    confidence: output.confidence,
+    reasoning,
+    evidence_ids: cited,
+  };
+}
+
+// Compact, structured, evidence-grounded prompt. No secrets, no raw application
+// state — just the findings, their evidence ids and the investigation context.
+function buildDecisionAgentPrompt(input) {
+  const src = input || {};
+  const evidence = Array.isArray(src.evidence) ? src.evidence : [];
+  const health = src.health && typeof src.health === "object" ? src.health : {};
+  const gate = src.gate && typeof src.gate === "object" ? src.gate : {};
+  const plan = Array.isArray(src.plan) ? src.plan : [];
+  const message = typeof src.message === "string" ? src.message : "";
+
+  const byDomain = {};
+
+  for (const item of evidence) {
+    if (!item || typeof item !== "object") continue;
+
+    const domain = typeof item.domain === "string" ? item.domain : "other";
+
+    if (!byDomain[domain]) byDomain[domain] = [];
+
+    byDomain[domain].push(
+      "- " + item.id + " [" + domain + "] " + item.finding,
+    );
+  }
+
+  const section = (title, domain) =>
+    byDomain[domain] && byDomain[domain].length > 0
+      ? title + ":\n" + byDomain[domain].join("\n")
+      : title + ": none";
+
+  return `You are ResolveAI's Decision Agent. Propose ONE business decision for this case.
+
+CUSTOMER MESSAGE:
+${message}
+
+INVESTIGATION PLAN (required domains): ${plan.join(", ") || "none"}
+
+EVIDENCE (each line is an evidence id you may cite):
+${section("ORDER EVIDENCE", "order")}
+${section("DELIVERY EVIDENCE", "delivery")}
+${section("CUSTOMER EVIDENCE", "customer")}
+${section("POLICY EVIDENCE", "policy")}
+
+INVESTIGATION HEALTH: conflict=${health.conflict_status || "none"} uncertainty=${health.uncertainty_status || "none"}
+DECISION GATE: ${gate.status || "unknown"}
+
+RULES:
+- Decide ONLY from the evidence listed above. Never invent facts.
+- Never invent evidence ids. Only cite ids that appear above.
+- "decision" MUST be exactly one of: APPROVE, DENY, INFORM, ESCALATE
+- "action" MUST be exactly one of: REFUND_SHIPPING_FEE, NO_ACTION, ESCALATE_TO_HUMAN
+- Allowed pairings: APPROVE -> REFUND_SHIPPING_FEE; DENY -> NO_ACTION; INFORM -> NO_ACTION; ESCALATE -> ESCALATE_TO_HUMAN
+- A refund requires policy evidence that supports it.
+- Never propose a refund for an order that is already refunded.
+- If the evidence is insufficient to decide safely, use ESCALATE.
+- You only propose; you never perform actions yourself.
+- Return ONLY valid JSON. No markdown, no code fences, no extra text.
+
+Return this exact JSON structure:
+{
+  "decision": "APPROVE",
+  "action": "REFUND_SHIPPING_FEE",
+  "confidence": 0.94,
+  "reasoning": "short explanation grounded in the cited evidence",
+  "evidence_ids": ["EV-001", "EV-004"]
+}
+`;
+}
+// <<< DECISION AGENT PURE LOGIC
+
+// Decision Agent execution: proposes a validated decision. It performs no writes
+// and executes no action; a blocked gate short-circuits before any LLM call.
+async function runDecisionAgent(input: {
+  gate: JsonObject;
+  message: string;
+  plan: string[];
+  evidence: JsonObject[];
+  health: JsonObject;
+  order: JsonObject | null;
+}): Promise<JsonObject> {
+  const blocked = blockedDecisionAgentResult(input.gate);
+
+  if (blocked) return blocked;
+
+  const llmResult = await askQwen(buildDecisionAgentPrompt(input), {
+    maxTokens: 600,
+  });
+
+  const failure = decisionAgentLlmFailure(llmResult);
+
+  if (failure) return failure;
+
+  const validation = validateDecisionAgentOutput({
+    output: llmResult.response,
+    evidence: input.evidence,
+    plan: input.plan,
+    order: input.order,
+    gate: input.gate,
+  });
+
+  if (!validation.valid) {
+    return {
+      agent: DECISION_AGENT_NAME,
+      status: "failed",
+      reason: validation.reason,
+    };
+  }
+
+  return {
+    agent: DECISION_AGENT_NAME,
+    status: "completed",
+    decision: validation.decision,
+    action: validation.action,
+    confidence: validation.confidence,
+    reasoning: validation.reasoning,
+    evidence_ids: validation.evidence_ids,
+  };
+}
+
+// ======================================================================
 // INVESTIGATION PLANNER + DOMAIN EXECUTOR (Phase 2A)
 // ======================================================================
 //
@@ -2732,8 +3040,22 @@ Deno.serve(async (req) => {
     // Step 2: build the Qwen reasoning prompt (unchanged)
     const qwenPrompt = buildQwenPrompt(message, investigation);
 
-    // Step 3: ask Qwen to reason about the case (unchanged)
-    const qwenResult = await askQwen(qwenPrompt);
+    // Phase 7: Decision Agent — proposes a validated, evidence-grounded decision
+    // from the FINAL state. It runs in parallel with the existing reasoning call
+    // (so it adds no latency) and is additive in this phase: the existing
+    // reasoning/decision/action path still decides and acts. A BLOCKed gate
+    // short-circuits before any LLM call.
+    const [qwenResult, decisionAgent] = await Promise.all([
+      askQwen(qwenPrompt),
+      runDecisionAgent({
+        gate: decisionGate,
+        message,
+        plan: planRun.plan,
+        evidence: reinvestigation.evidence,
+        health: reinvestigation.health,
+        order: orderLookup.order,
+      }),
+    ]);
 
     console.log(
       "triage",
@@ -2784,6 +3106,19 @@ Deno.serve(async (req) => {
       }),
     );
 
+    console.log(
+      "decision_agent",
+      JSON.stringify({
+        case_id: caseId,
+        status: decisionAgent.status,
+        decision: decisionAgent.decision ?? null,
+        action: decisionAgent.action ?? null,
+        confidence: decisionAgent.confidence ?? null,
+        evidence_ids: decisionAgent.evidence_ids ?? [],
+        reason: decisionAgent.reasoning ?? decisionAgent.reason ?? null,
+      }),
+    );
+
     // Every successful response carries the triage result, the executed plan, a
     // minimal evidence summary and the investigation health (additive; existing
     // keys and values are unchanged).
@@ -2816,6 +3151,28 @@ Deno.serve(async (req) => {
           status: decisionGate.status,
           reason: decisionGate.reason,
           reasons: decisionGate.reasons,
+        },
+        decision_agent: {
+          status: decisionAgent.status,
+          decision:
+            typeof decisionAgent.decision === "string"
+              ? decisionAgent.decision
+              : null,
+          action:
+            typeof decisionAgent.action === "string" ? decisionAgent.action : null,
+          confidence:
+            typeof decisionAgent.confidence === "number"
+              ? decisionAgent.confidence
+              : null,
+          evidence_ids: Array.isArray(decisionAgent.evidence_ids)
+            ? decisionAgent.evidence_ids
+            : [],
+          reason:
+            typeof decisionAgent.reasoning === "string"
+              ? decisionAgent.reasoning
+              : typeof decisionAgent.reason === "string"
+                ? decisionAgent.reason
+                : null,
         },
       });
 
