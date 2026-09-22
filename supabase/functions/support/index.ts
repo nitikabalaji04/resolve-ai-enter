@@ -1200,6 +1200,239 @@ function buildEvidence(agentResults) {
 // <<< EVIDENCE ENGINE PURE LOGIC
 
 // ======================================================================
+// CONFLICT & UNCERTAINTY ENGINE (Phase 4)
+// ======================================================================
+//
+// Deterministic DETECTION ONLY. It reads the Evidence Engine output and reports
+// whether the collected evidence is internally contradictory or insufficient.
+//
+// It never decides the customer-support outcome: no LLM, no database queries, no
+// policy interpretation, no new business rules. It answers only: "is this
+// evidence set contradictory, and is anything required missing?"
+
+// >>> CONFLICT ENGINE PURE LOGIC (plain JS — extracted verbatim by conflict-engine.test.mjs)
+// Evidence below this confidence is treated as not safely usable.
+const CONFIDENCE_THRESHOLD = 0.5;
+
+// Only single-valued factual dimensions are compared, so unrelated facts are
+// never mistaken for contradictions. (A list-valued field such as the policy
+// `Condition: …` entries is deliberately excluded.) Extend this map to cover
+// new single-valued dimensions.
+const SINGLE_VALUED_DIMENSIONS = {
+  "delivery status": { type: "delivery_status_conflict", domain: "delivery" },
+  "order status": { type: "order_status_conflict", domain: "order" },
+  "payment status": { type: "payment_status_conflict", domain: "order" },
+  "refund status": { type: "refund_status_conflict", domain: "order" },
+};
+
+// Uncertainty types that mean the evidence may be insufficient for a safe
+// investigation (used for the re-investigation flag; the loop itself is a later
+// phase).
+const REINVESTIGATION_TRIGGERS = [
+  "agent_failure",
+  "agent_not_found",
+  "missing_domain",
+  "low_confidence",
+];
+
+function agentForDomain(domain) {
+  return domain + "_agent";
+}
+
+function domainLabel(domain) {
+  return domain.charAt(0).toUpperCase() + domain.slice(1);
+}
+
+// Splits a stored finding into its factual dimension and value. Findings that do
+// not follow the "Dimension: value" shape are ignored (never guessed at).
+function splitFinding(text) {
+  if (typeof text !== "string") return null;
+
+  const index = text.indexOf(": ");
+
+  if (index === -1) return null;
+
+  const label = text.slice(0, index).trim();
+  const value = text.slice(index + 2).trim();
+
+  if (label === "" || value === "") return null;
+
+  return { label, value };
+}
+
+// Contradictions: the same single-valued dimension carrying different values.
+// Different dimensions, or one dimension with a single consistent value, are
+// never conflicts. Evidence ids always come from the real evidence items.
+function detectConflicts(evidence) {
+  const dimensions = {};
+  const conflicts = [];
+
+  for (const item of evidence) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+
+    const parts = splitFinding(item.finding);
+
+    if (!parts) continue;
+
+    const key = parts.label.toLowerCase();
+    const dimension = SINGLE_VALUED_DIMENSIONS[key];
+
+    if (!dimension) continue;
+
+    if (!dimensions[key]) {
+      dimensions[key] = { label: parts.label, dimension, values: {}, order: [] };
+    }
+
+    const entry = dimensions[key];
+    const valueKey = parts.value.toLowerCase();
+
+    if (!entry.values[valueKey]) {
+      entry.values[valueKey] = { ids: [] };
+      entry.order.push(valueKey);
+    }
+
+    if (typeof item.id === "string" && !entry.values[valueKey].ids.includes(item.id)) {
+      entry.values[valueKey].ids.push(item.id);
+    }
+  }
+
+  for (const key of Object.keys(dimensions)) {
+    const entry = dimensions[key];
+
+    // A single distinct value is consistent — not a conflict.
+    if (entry.order.length < 2) continue;
+
+    const evidenceIds = [];
+
+    for (const valueKey of entry.order) {
+      for (const id of entry.values[valueKey].ids) {
+        if (!evidenceIds.includes(id)) evidenceIds.push(id);
+      }
+    }
+
+    conflicts.push({
+      type: entry.dimension.type,
+      domain: entry.dimension.domain,
+      evidence_ids: evidenceIds,
+      description: "Conflicting " + entry.label.toLowerCase() + " evidence",
+    });
+  }
+
+  return conflicts;
+}
+
+// Uncertainty: a required domain whose evidence is missing, unusable, or not
+// confidently established. Only domains required by the current plan are
+// considered — an unused agent's failure does not make the case incomplete.
+function detectUncertainties(evidence, agentStatus, requiredDomains) {
+  const uncertainties = [];
+  const missingDomains = [];
+  const status =
+    agentStatus && typeof agentStatus === "object" && !Array.isArray(agentStatus)
+      ? agentStatus
+      : {};
+  const domains = Array.isArray(requiredDomains) ? requiredDomains : [];
+
+  for (const rawDomain of domains) {
+    if (typeof rawDomain !== "string" || rawDomain.trim() === "") continue;
+
+    const domain = rawDomain.trim().toLowerCase();
+    const agent = agentForDomain(domain);
+    const label = domainLabel(domain);
+    const agentState = typeof status[agent] === "string" ? status[agent] : null;
+    const items = evidence.filter(function (item) {
+      return item && typeof item === "object" && item.domain === domain;
+    });
+
+    const markMissing = function () {
+      if (!missingDomains.includes(domain)) missingDomains.push(domain);
+    };
+
+    if (agentState === "failed") {
+      uncertainties.push({
+        type: "agent_failure",
+        agent,
+        description: label + " evidence unavailable because the " + domain + " agent failed",
+      });
+      markMissing();
+      continue;
+    }
+
+    if (agentState === "not_found") {
+      uncertainties.push({
+        type: "agent_not_found",
+        agent,
+        description: label + " evidence unavailable because the " + domain + " agent found no matching record",
+      });
+      markMissing();
+      continue;
+    }
+
+    if (items.length === 0) {
+      uncertainties.push({
+        type: "missing_domain",
+        domain,
+        description: label + " evidence is unavailable",
+      });
+      markMissing();
+      continue;
+    }
+
+    const weak = items.filter(function (item) {
+      return typeof item.confidence === "number" && item.confidence < CONFIDENCE_THRESHOLD;
+    });
+
+    if (weak.length > 0) {
+      uncertainties.push({
+        type: "low_confidence",
+        domain,
+        evidence_ids: weak
+          .map(function (item) {
+            return item.id;
+          })
+          .filter(function (id) {
+            return typeof id === "string";
+          }),
+        description: label + " evidence is below the confidence threshold",
+      });
+    }
+  }
+
+  return { uncertainties, missingDomains };
+}
+
+// analyzeEvidence(evidence, agentStatus, requiredDomains) -> investigation health
+//
+// Pure, deterministic and non-throwing: malformed input is ignored, the input is
+// never mutated, and the same ordered input always yields the same output.
+function analyzeEvidence(evidence, agentStatus, requiredDomains) {
+  const items = Array.isArray(evidence) ? evidence : [];
+
+  const conflicts = detectConflicts(items);
+  const { uncertainties, missingDomains } = detectUncertainties(
+    items,
+    agentStatus,
+    requiredDomains,
+  );
+
+  const needsReinvestigation =
+    conflicts.length > 0 ||
+    uncertainties.some(function (uncertainty) {
+      return REINVESTIGATION_TRIGGERS.includes(uncertainty.type);
+    });
+
+  return {
+    conflict_status: conflicts.length > 0 ? "detected" : "none",
+    uncertainty_status: uncertainties.length > 0 ? "detected" : "none",
+    requires_reinvestigation: needsReinvestigation,
+    conflicts,
+    uncertainties,
+    missing_domains: missingDomains,
+  };
+}
+// <<< CONFLICT ENGINE PURE LOGIC
+
+// ======================================================================
 // INVESTIGATION PLANNER + DOMAIN EXECUTOR (Phase 2A)
 // ======================================================================
 //
@@ -2044,6 +2277,15 @@ Deno.serve(async (req) => {
       planRun.results.map((result) => result.data),
     );
 
+    // Phase 4: Conflict & Uncertainty Engine — detection only. It reports whether
+    // the evidence is contradictory or insufficient for the required domains; it
+    // decides nothing and changes no downstream behaviour.
+    const healthRun = analyzeEvidence(
+      evidenceRun.evidence,
+      evidenceRun.agent_status,
+      planRun.plan,
+    );
+
     // Step 2: build the Qwen reasoning prompt (unchanged)
     const qwenPrompt = buildQwenPrompt(message, investigation);
 
@@ -2073,9 +2315,22 @@ Deno.serve(async (req) => {
       }),
     );
 
-    // Every successful response carries the triage result, the executed plan and
-    // a minimal evidence summary (additive; existing keys and values are
-    // unchanged).
+    console.log(
+      "investigation_health",
+      JSON.stringify({
+        case_id: caseId,
+        conflict_status: healthRun.conflict_status,
+        uncertainty_status: healthRun.uncertainty_status,
+        requires_reinvestigation: healthRun.requires_reinvestigation,
+        conflicts: healthRun.conflicts.length,
+        uncertainties: healthRun.uncertainties.length,
+        missing_domains: healthRun.missing_domains,
+      }),
+    );
+
+    // Every successful response carries the triage result, the executed plan, a
+    // minimal evidence summary and the investigation health (additive; existing
+    // keys and values are unchanged).
     const respond = (payload: JsonObject) =>
       json({
         ...payload,
@@ -2088,6 +2343,11 @@ Deno.serve(async (req) => {
         evidence_summary: {
           count: evidenceRun.evidence.length,
           agent_status: evidenceRun.agent_status,
+        },
+        investigation_health: {
+          conflict_status: healthRun.conflict_status,
+          uncertainty_status: healthRun.uncertainty_status,
+          requires_reinvestigation: healthRun.requires_reinvestigation,
         },
       });
 
