@@ -618,6 +618,133 @@ function runOrderAgent(
 }
 
 // ======================================================================
+// DELIVERY AGENT (Phase 2D)
+// ======================================================================
+//
+// Specialized data-investigation agent for the `delivery` domain. It only
+// structures the delivery/shipping information that already lives on the order
+// row — no new delivery fact is calculated or inferred.
+//
+// IMPORTANT: the delivery view itself is produced by the existing
+// `deliverySnapshot()` derivation (Phase 2A), so the delivery semantics used
+// across the product are preserved exactly. No second database query is issued:
+// the agent reuses the shared order lookup.
+
+// >>> DELIVERY AGENT PURE LOGIC (plain JS — extracted verbatim by delivery-agent.test.mjs)
+const DELIVERY_AGENT_NAME = "delivery_agent";
+
+// True when the snapshot carries real delivery information: any delivery text
+// field, or a positive recorded delay. A row that only holds the numeric
+// default (delay 0) with no status/shipping/dates counts as no delivery info.
+function hasDeliveryInfo(delivery) {
+  if (!delivery || typeof delivery !== "object") return false;
+
+  const text = (value) => typeof value === "string" && value.trim() !== "";
+
+  if (
+    text(delivery.status) ||
+    text(delivery.shipping_type) ||
+    text(delivery.expected_delivery) ||
+    text(delivery.actual_delivery)
+  ) {
+    return true;
+  }
+
+  return (
+    typeof delivery.delivery_days_delayed === "number" &&
+    delivery.delivery_days_delayed > 0
+  );
+}
+
+// Builds findings strictly from the existing delivery fields. The derived flags
+// (delayed / delivered) stay in the `delivery` payload but are not restated as
+// findings, because they are computed from the stored delay/status fields.
+function deliveryFindings(delivery) {
+  const findings = [];
+
+  if (!delivery || typeof delivery !== "object") return findings;
+
+  const push = (finding) => {
+    findings.push({ finding, source: "orders", confidence: 1.0 });
+  };
+
+  const text = (value) => typeof value === "string" && value.trim() !== "";
+
+  if (text(delivery.status)) {
+    push("Delivery status: " + delivery.status);
+  }
+  if (text(delivery.shipping_type)) {
+    push("Shipping method: " + delivery.shipping_type);
+  }
+  if (text(delivery.expected_delivery)) {
+    push("Promised delivery date: " + delivery.expected_delivery);
+  }
+  if (text(delivery.actual_delivery)) {
+    push("Actual delivery date: " + delivery.actual_delivery);
+  }
+
+  if (typeof delivery.delivery_days_delayed === "number") {
+    push(
+      delivery.delivery_days_delayed > 0
+        ? "Recorded delivery delay: " + delivery.delivery_days_delayed + " day(s)"
+        : "Recorded delivery delay: none",
+    );
+  }
+
+  return findings;
+}
+
+// Assembles the Delivery Agent's structured result from the shared order lookup.
+//   completed -> the order carries delivery information
+//   not_found -> no order, or the order carries no delivery information
+//   failed    -> the shared order query failed
+function deliveryAgentResult(input) {
+  const src = input || {};
+
+  if (src.orderError) {
+    return {
+      agent: DELIVERY_AGENT_NAME,
+      domain: "delivery",
+      status: "failed",
+      delivery: null,
+      findings: [],
+    };
+  }
+
+  const snapshot = deliverySnapshot(src.order);
+
+  if (!snapshot || !hasDeliveryInfo(snapshot)) {
+    return {
+      agent: DELIVERY_AGENT_NAME,
+      domain: "delivery",
+      status: "not_found",
+      delivery: null,
+      findings: [],
+    };
+  }
+
+  return {
+    agent: DELIVERY_AGENT_NAME,
+    domain: "delivery",
+    status: "completed",
+    delivery: snapshot,
+    findings: deliveryFindings(snapshot),
+  };
+}
+// <<< DELIVERY AGENT PURE LOGIC
+
+// Delivery Agent execution. Reuses the shared order lookup (no duplicate query)
+// and never throws: a query failure is reported as `failed`.
+function runDeliveryAgent(
+  orderLookup: { order: JsonObject | null; error: string | null },
+): JsonObject {
+  return deliveryAgentResult({
+    order: orderLookup.order,
+    orderError: orderLookup.error,
+  });
+}
+
+// ======================================================================
 // CUSTOMER AGENT (Phase 2B)
 // ======================================================================
 //
@@ -1025,11 +1152,12 @@ async function executeDomain(
     }
 
     if (domain === "delivery") {
-      const snapshot = deliverySnapshot(orderRow);
+      // Delegated to the Delivery Agent (Phase 2D). It runs because the planner
+      // selected the `delivery` domain, reuses the shared order lookup, and
+      // structures the existing delivery snapshot without new interpretation.
+      const agentResult = runDeliveryAgent(orderLookup);
 
-      return snapshot
-        ? domainResult("delivery", "completed", snapshot)
-        : domainResult("delivery", "not_found", null);
+      return domainResult("delivery", agentResult.status as string, agentResult);
     }
 
     if (domain === "customer") {
