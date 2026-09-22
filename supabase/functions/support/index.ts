@@ -2148,6 +2148,157 @@ async function runDecisionAgent(input: {
 }
 
 // ======================================================================
+// DECISION AUTHORITY + ACTION SAFETY GATE (Phase 8)
+// ======================================================================
+//
+// The validated Decision Agent is the authoritative source for automated
+// decisions. This layer decides whether an automated action may run at all, and
+// then whether the specific action is safe — the legacy reasoning path can never
+// override it.
+//
+// Pure and deterministic: no database writes, no LLM calls, no action
+// execution, never throws, never mutates its input.
+
+// >>> ACTION AUTHORITY PURE LOGIC (plain JS — extracted verbatim by action-authority.test.mjs)
+// The authoritative vocabulary maps onto the existing legacy decision/action
+// vocabulary so the existing response builders, executor and persistence are
+// reused unchanged.
+const LEGACY_DECISION_BY_AUTHORITY = {
+  APPROVE: "approve",
+  DENY: "deny",
+  INFORM: "inform",
+  ESCALATE: "escalate",
+};
+
+const LEGACY_ACTION_BY_AUTHORITY = {
+  REFUND_SHIPPING_FEE: "refund_shipping_fee",
+  NO_ACTION: "no_action",
+  ESCALATE_TO_HUMAN: "human_review",
+};
+
+// Only a successfully validated Decision Agent result can authorize an action.
+// Everything else blocks — and a blocked case never falls back to legacy
+// reasoning for action authority.
+function resolveAuthoritativeDecision(input) {
+  const src = input || {};
+  const gate =
+    src.decisionGate && typeof src.decisionGate === "object" ? src.decisionGate : null;
+  const agent =
+    src.decisionAgent && typeof src.decisionAgent === "object"
+      ? src.decisionAgent
+      : null;
+  const validation =
+    src.validation && typeof src.validation === "object" ? src.validation : null;
+
+  if (!gate || gate.status !== "PROCEED") {
+    return {
+      status: "blocked",
+      reason:
+        gate && gate.status === "BLOCK"
+          ? "DECISION_GATE_BLOCKED"
+          : "DECISION_GATE_NOT_PROCEED",
+    };
+  }
+
+  if (!agent) return { status: "blocked", reason: "DECISION_AGENT_MISSING" };
+
+  if (agent.status === "blocked") {
+    return { status: "blocked", reason: "DECISION_AGENT_BLOCKED" };
+  }
+
+  if (agent.status === "failed") {
+    return {
+      status: "blocked",
+      reason: typeof agent.reason === "string" ? agent.reason : "DECISION_AGENT_FAILED",
+    };
+  }
+
+  if (agent.status !== "completed") {
+    return { status: "blocked", reason: "DECISION_AGENT_NOT_COMPLETED" };
+  }
+
+  if (validation && validation.valid !== true) {
+    return { status: "blocked", reason: "DECISION_AGENT_VALIDATION_FAILED" };
+  }
+
+  if (
+    !DECISION_AGENT_DECISIONS.includes(agent.decision) ||
+    !DECISION_AGENT_ACTIONS.includes(agent.action)
+  ) {
+    return { status: "blocked", reason: "INVALID_DECISION_AGENT_OUTPUT" };
+  }
+
+  return {
+    status: "authorized",
+    decision: agent.decision,
+    action: agent.action,
+  };
+}
+
+// Deterministic safety check before the existing action executor is called.
+function validateAuthorizedAction(input) {
+  const src = input || {};
+  const decision =
+    typeof src.decision === "string" ? src.decision.trim().toUpperCase() : "";
+  const action =
+    typeof src.action === "string" ? src.action.trim().toUpperCase() : "";
+  const evidence = Array.isArray(src.evidence) ? src.evidence : [];
+  const plan = Array.isArray(src.plan) ? src.plan : [];
+  const investigation =
+    src.investigation && typeof src.investigation === "object"
+      ? src.investigation
+      : null;
+  const order =
+    src.order && typeof src.order === "object" && !Array.isArray(src.order)
+      ? src.order
+      : investigation && investigation.order && typeof investigation.order === "object"
+        ? investigation.order
+        : null;
+
+  const blocked = (reason) => ({ status: "blocked", reason });
+
+  if (!DECISION_AGENT_DECISIONS.includes(decision)) {
+    return blocked("UNSUPPORTED_DECISION");
+  }
+
+  if (!DECISION_AGENT_ACTIONS.includes(action)) {
+    return blocked("UNSUPPORTED_ACTION");
+  }
+
+  const allowedActions = DECISION_ACTION_MAP[decision] || [];
+
+  if (!allowedActions.includes(action)) {
+    return blocked("INVALID_DECISION_ACTION_PAIRING");
+  }
+
+  if (action === "REFUND_SHIPPING_FEE") {
+    if (!order) return blocked("ORDER_MISSING");
+
+    // Never authorise a second refund for an order that was already refunded.
+    if (order.refund_status === "initiated") {
+      return blocked("ACTION_ALREADY_COMPLETED");
+    }
+
+    if (evidence.length === 0) return blocked("REQUIRED_EVIDENCE_MISSING");
+
+    const planRequiresPolicy = plan.some(function (domain) {
+      return typeof domain === "string" && domain.trim().toLowerCase() === "policy";
+    });
+
+    if (planRequiresPolicy) {
+      const hasPolicyEvidence = evidence.some(function (item) {
+        return item && typeof item === "object" && item.domain === "policy";
+      });
+
+      if (!hasPolicyEvidence) return blocked("POLICY_EVIDENCE_MISSING");
+    }
+  }
+
+  return { status: "allowed", reason: null };
+}
+// <<< ACTION AUTHORITY PURE LOGIC
+
+// ======================================================================
 // INVESTIGATION PLANNER + DOMAIN EXECUTOR (Phase 2A)
 // ======================================================================
 //
@@ -3174,137 +3325,114 @@ Deno.serve(async (req) => {
                 ? decisionAgent.reason
                 : null,
         },
+        // Phase 8: which decision actually held authority, whether its action was
+        // safe to run, and the legacy reasoning kept as compatibility data only.
+        decision_authority: {
+          status: authority.status,
+          decision:
+            typeof authority.decision === "string" ? authority.decision : null,
+          action: typeof authority.action === "string" ? authority.action : null,
+          reason: typeof authority.reason === "string" ? authority.reason : null,
+        },
+        action_safety: {
+          status: actionSafety.status,
+          reason:
+            typeof actionSafety.reason === "string" ? actionSafety.reason : null,
+        },
+        legacy_reasoning: {
+          valid: legacyValidation.valid,
+          decision: legacyValidation.decision,
+          action: legacyValidation.action,
+        },
       });
 
-    // Step 4: if Qwen is unavailable, escalate
-    if (qwenResult.status !== "success") {
-      const decision = {
-        decision: "escalate",
-        reason: "AI reasoning was unavailable.",
-        action: "human_review",
-        evidence: [],
-        intent: "",
-      };
+    // ---- Phase 8: Decision Authority ------------------------------------
+    // The validated Decision Agent is the authoritative source for automated
+    // decisions. The legacy reasoning result is kept below as compatibility data
+    // only and can never control, override or duplicate an action.
+    const authority = resolveAuthoritativeDecision({
+      decisionGate,
+      decisionAgent,
+      // runDecisionAgent only reports "completed" after its own validation passed.
+      validation: { valid: decisionAgent.status === "completed" },
+      investigation,
+      order: orderLookup.order,
+    });
 
-      const escalationCase = createEscalationCase({
-        customerMessage: message,
-        investigation,
-        qwenResponse: {},
-        reason: "AI reasoning was unavailable.",
-      });
+    // Only an authorized decision has an action to safety-check; a blocked
+    // authority reports its own reason so the cause stays clear.
+    const actionSafety =
+      authority.status === "authorized"
+        ? validateAuthorizedAction({
+            decision: authority.decision,
+            action: authority.action,
+            order: orderLookup.order,
+            investigation,
+            evidence: reinvestigation.evidence,
+            plan: planRun.plan,
+          })
+        : { status: "blocked", reason: authority.reason };
 
-      const customerResponse = buildCustomerResponse(decision, investigation, orderId);
+    // The authoritative decision, expressed in the existing legacy vocabulary so
+    // the existing response builders, executor and persistence stay unchanged.
+    // A blocked/failed authority escalates instead of inventing a business
+    // decision, and never falls back to the legacy reasoning action.
+    const decision =
+      authority.status === "authorized" && actionSafety.status === "allowed"
+        ? {
+            decision: LEGACY_DECISION_BY_AUTHORITY[authority.decision],
+            action: LEGACY_ACTION_BY_AUTHORITY[authority.action],
+            reason:
+              typeof decisionAgent.reasoning === "string"
+                ? decisionAgent.reasoning
+                : "Decision Agent authorized this action.",
+            evidence: Array.isArray(decisionAgent.evidence_ids)
+              ? decisionAgent.evidence_ids
+              : [],
+            intent: triage.intent || decisionAgent.decision || "",
+          }
+        : {
+            decision: "escalate",
+            action: "human_review",
+            reason:
+              "No automated action was authorized: " +
+              (authority.status === "blocked"
+                ? authority.reason
+                : actionSafety.reason),
+            evidence: [],
+            intent: triage.intent || "",
+          };
 
-      await persistCaseRecord(supabase, {
-        case_id: caseId,
-        customer_id: investigation.customer_id,
-        order_id: orderId,
-        customer_message: message,
-        intent: decision.intent,
-        decision: decision.decision,
-        reason: decision.reason,
-        action: decision.action,
-        evidence: decision.evidence,
-        action_status: "not_required",
-        verification_status: "not_required",
-        resolution_status: customerResponse.status,
-        escalation_reason: escalationCase.escalation_reason,
-        case_status: "escalated",
-      });
-
-      return respond({
-        case_id: caseId,
-        customer_message: message,
-        investigation,
-        decision,
-        action_status: "not_required",
-        verification_status: "not_required",
-        resolution_status: customerResponse.status,
-        customer_response: customerResponse,
-        escalation_case: escalationCase,
-      });
-    }
-
-    // Step 5: get Qwen's structured response
-    const qwenResponse = qwenResult.response;
-
-    // Step 6: validate Qwen's decision
-    const validation = validateQwenDecision(qwenResponse);
-
-    // Step 7: if Qwen gives an invalid response, escalate
-    if (!validation.valid) {
-      const qwenObj = asObject(qwenResponse);
-
-      const decision = {
-        decision: "escalate",
-        reason: validation.reason,
-        action: "human_review",
-        evidence: qwenObj.evidence ?? [],
-        intent: qwenObj.intent ?? "",
-      };
-
-      const escalationCase = createEscalationCase({
-        customerMessage: message,
-        investigation,
-        qwenResponse: qwenObj,
-        reason: validation.reason,
-      });
-
-      const customerResponse = buildCustomerResponse(decision, investigation, orderId);
-
-      await persistCaseRecord(supabase, {
-        case_id: caseId,
-        customer_id: investigation.customer_id,
-        order_id: orderId,
-        customer_message: message,
-        intent: typeof decision.intent === "string" ? decision.intent : "",
-        decision: decision.decision,
-        reason: decision.reason,
-        action: decision.action,
-        evidence: Array.isArray(decision.evidence) ? decision.evidence : [],
-        action_status: "not_required",
-        verification_status: "not_required",
-        resolution_status: customerResponse.status,
-        escalation_reason: escalationCase.escalation_reason,
-        case_status: "escalated",
-      });
-
-      return respond({
-        case_id: caseId,
-        customer_message: message,
-        investigation,
-        qwen_response: qwenResponse,
-        decision,
-        action_status: "not_required",
-        verification_status: "not_required",
-        resolution_status: customerResponse.status,
-        customer_response: customerResponse,
-        escalation_case: escalationCase,
-      });
-    }
-
-    // Step 8: build the validated decision
+    // LEGACY REASONING DATA — informational only, never authoritative.
+    const qwenResponse =
+      qwenResult.status === "success" ? qwenResult.response : undefined;
+    const legacyValidation = validateQwenDecision(qwenResponse);
     const qwenObj = asObject(qwenResponse);
-    const decision = {
-      decision: validation.decision,
-      reason:
-        typeof qwenObj.reason === "string"
-          ? qwenObj.reason
-          : "No reason provided.",
-      action: validation.action,
-      evidence: qwenObj.evidence ?? [],
-      intent: qwenObj.intent ?? "",
-    };
 
-    // Step 9: handle human escalation
-    if (validation.decision === "escalate") {
+    console.log(
+      "decision_authority",
+      JSON.stringify({
+        case_id: caseId,
+        authority,
+        action_safety: actionSafety,
+        legacy_reasoning: {
+          valid: legacyValidation.valid,
+          decision: legacyValidation.decision,
+          action: legacyValidation.action,
+        },
+        executed: decision.decision + "/" + decision.action,
+      }),
+    );
+
+    // Step 9: handle human escalation (authoritative decision)
+    if (decision.decision === "escalate") {
       const escalationCase = createEscalationCase({
         customerMessage: message,
         investigation,
         qwenResponse,
         reason:
-          typeof qwenObj.reason === "string"
-            ? qwenObj.reason
+          typeof decision.reason === "string"
+            ? decision.reason
             : "Human review is required.",
       });
 
@@ -3342,7 +3470,7 @@ Deno.serve(async (req) => {
     }
 
     // Step 9b: informational / order-status request — no action is executed.
-    if (validation.decision === "inform") {
+    if (decision.decision === "inform") {
       // An informational response requires the order record; without it the
       // case is safely escalated to human review instead.
       if (!investigation.order) {
@@ -3360,8 +3488,8 @@ Deno.serve(async (req) => {
           decision: "escalate",
           reason: escalationReason,
           action: "human_review",
-          evidence: qwenObj.evidence ?? [],
-          intent: qwenObj.intent ?? "",
+          evidence: decision.evidence ?? [],
+          intent: decision.intent ?? "",
         };
 
         const customerResponse = buildCustomerResponse(
@@ -3375,14 +3503,11 @@ Deno.serve(async (req) => {
           customer_id: investigation.customer_id,
           order_id: orderId,
           customer_message: message,
-          intent:
-            typeof qwenObj.intent === "string" ? qwenObj.intent : "",
+          intent: typeof decision.intent === "string" ? decision.intent : "",
           decision: "escalate",
           reason: escalationReason,
           action: "human_review",
-          evidence: Array.isArray(qwenObj.evidence)
-            ? qwenObj.evidence
-            : [],
+          evidence: Array.isArray(decision.evidence) ? decision.evidence : [],
           action_status: "not_required",
           verification_status: "not_required",
           resolution_status: customerResponse.status,
@@ -3439,14 +3564,14 @@ Deno.serve(async (req) => {
     // Step 10: execute an automatically approved action
     const actionResult = await executeAction(
       supabase,
-      validation.action,
+      decision.action,
       investigation,
     );
 
     // Step 11: verify that the action actually happened
     const verification = await verifyAction(
       supabase,
-      validation.action,
+      decision.action,
       investigation,
     );
 
