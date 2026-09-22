@@ -101,7 +101,7 @@ const tickets = [{ ticket_id: 'TKT1001' }]
 const policyRow = { policy_id: 1, policy_type: 'delivery_refund' }
 
 const full = api.buildInvestigation([
-  api.domainResult('order', 'completed', orderRow),
+  api.domainResult('order', 'completed', { agent: 'order_agent', domain: 'order', status: 'completed', order: orderRow, findings: [] }),
   api.domainResult('delivery', 'completed', api.deliverySnapshot(orderRow)),
   api.domainResult('customer', 'completed', { agent: 'customer_agent', domain: 'customer', status: 'completed', customer: customerRow, support_history: tickets, findings: [] }),
   api.domainResult('policy', 'completed', policyRow),
@@ -114,7 +114,7 @@ check('full plan -> legacy shape (customer_id)', full.customer_id === 'CUST001')
 check('no extra keys added to investigation', JSON.stringify(Object.keys(full).sort()) === JSON.stringify(['customer', 'customer_id', 'order', 'policy', 'ticket_history']))
 
 const withoutPolicy = api.buildInvestigation([
-  api.domainResult('order', 'completed', orderRow),
+  api.domainResult('order', 'completed', { agent: 'order_agent', domain: 'order', status: 'completed', order: orderRow, findings: [] }),
   api.domainResult('delivery', 'completed', api.deliverySnapshot(orderRow)),
   api.domainResult('customer', 'completed', { agent: 'customer_agent', domain: 'customer', status: 'completed', customer: customerRow, support_history: tickets, findings: [] }),
 ])
@@ -122,7 +122,7 @@ check('ORDER_STATUS plan leaves policy empty', withoutPolicy.policy === null)
 check('ORDER_STATUS plan still has order + customer', withoutPolicy.order.order_id === '10482' && withoutPolicy.customer.name === 'Ananya Sharma')
 
 const deliveryIrrelevant = api.buildInvestigation([
-  api.domainResult('order', 'completed', orderRow),
+  api.domainResult('order', 'completed', { agent: 'order_agent', domain: 'order', status: 'completed', order: orderRow, findings: [] }),
   api.domainResult('customer', 'completed', { agent: 'customer_agent', domain: 'customer', status: 'completed', customer: customerRow, support_history: tickets, findings: [] }),
   api.domainResult('policy', 'completed', policyRow),
 ])

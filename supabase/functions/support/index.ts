@@ -115,13 +115,12 @@ async function investigate(
   supabase: SupabaseClient,
   orderId: string,
 ): Promise<Investigation> {
-  const orderRow = await resolveOrderRow(supabase, orderId);
+  const orderLookup = await resolveOrder(supabase, orderId);
 
   const { investigation } = await runInvestigationPlan(
     supabase,
-    orderId,
     { domains: DOMAINS },
-    orderRow,
+    orderLookup,
   );
 
   return investigation;
@@ -501,6 +500,124 @@ async function runTriage(
 }
 
 // ======================================================================
+// ORDER AGENT (Phase 2C)
+// ======================================================================
+//
+// Specialized data-investigation agent for the `order` domain. One
+// responsibility: retrieve and analyse order-specific information relevant to
+// the current case (order details, status, dates, product, payment/refund
+// fields already present in the schema).
+//
+// Deterministic database calls only — no LLM is used to retrieve order data, and
+// nothing is invented or inferred from missing fields.
+
+// >>> ORDER AGENT PURE LOGIC (plain JS — extracted verbatim by order-agent.test.mjs)
+const ORDER_AGENT_NAME = "order_agent";
+
+// Builds findings strictly from the retrieved order row. Every finding is a
+// direct record read, so confidence is 1.0. Missing optional fields simply
+// produce no finding — they are never filled in or guessed.
+//
+// NOTE: the orders table stores a single `product` value (there is no line-item
+// table), so multi-item orders are reported exactly as stored.
+function orderFindings(order) {
+  const findings = [];
+
+  if (!order || typeof order !== "object") return findings;
+
+  const push = (finding) => {
+    findings.push({ finding, source: "orders", confidence: 1.0 });
+  };
+
+  const text = (value) => typeof value === "string" && value.trim() !== "";
+
+  if (text(order.order_id)) push("Order ID: " + order.order_id);
+  if (text(order.product)) push("Product: " + order.product);
+  if (text(order.status)) push("Order status: " + order.status);
+  if (text(order.order_date)) push("Order placed on " + order.order_date);
+  if (text(order.expected_delivery)) {
+    push("Promised delivery date: " + order.expected_delivery);
+  }
+  if (text(order.actual_delivery)) push("Delivered on " + order.actual_delivery);
+  if (text(order.shipping_type)) {
+    push("Shipping type: " + order.shipping_type);
+  }
+
+  if (typeof order.delivery_days_delayed === "number") {
+    push(
+      order.delivery_days_delayed > 0
+        ? "Recorded delay: " + order.delivery_days_delayed + " day(s)"
+        : "Recorded delay: none",
+    );
+  }
+
+  if (typeof order.amount === "number") push("Order amount: " + order.amount);
+  if (text(order.payment_status)) {
+    push("Payment status: " + order.payment_status);
+  }
+  if (text(order.refund_status)) push("Refund status: " + order.refund_status);
+  if (text(order.customer_id)) push("Order owner: " + order.customer_id);
+
+  return findings;
+}
+
+// Assembles the Order Agent's structured result from an order lookup. The status
+// is driven only by the query outcome:
+//   completed -> order row found
+//   not_found -> no order row exists
+//   failed    -> the order query failed
+function orderAgentResult(input) {
+  const src = input || {};
+
+  if (src.orderError) {
+    return {
+      agent: ORDER_AGENT_NAME,
+      domain: "order",
+      status: "failed",
+      order: null,
+      findings: [],
+    };
+  }
+
+  const order =
+    src.order && typeof src.order === "object" && !Array.isArray(src.order)
+      ? src.order
+      : null;
+
+  if (!order) {
+    return {
+      agent: ORDER_AGENT_NAME,
+      domain: "order",
+      status: "not_found",
+      order: null,
+      findings: [],
+    };
+  }
+
+  return {
+    agent: ORDER_AGENT_NAME,
+    domain: "order",
+    status: "completed",
+    order,
+    findings: orderFindings(order),
+  };
+}
+// <<< ORDER AGENT PURE LOGIC
+
+// Order Agent execution. Reuses the order row the planner already fetched — one
+// shared query, no duplicated database logic — and shapes it into the agent
+// result. Deterministic and non-throwing: a query failure is reported as
+// `failed` so the rest of the plan still runs.
+function runOrderAgent(
+  orderLookup: { order: JsonObject | null; error: string | null },
+): JsonObject {
+  return orderAgentResult({
+    order: orderLookup.order,
+    orderError: orderLookup.error,
+  });
+}
+
+// ======================================================================
 // CUSTOMER AGENT (Phase 2B)
 // ======================================================================
 //
@@ -817,10 +934,15 @@ function buildInvestigation(results) {
     return result && result.status === "completed" ? result.data : null;
   };
 
+  // The order domain is produced by the Order Agent (Phase 2C), whose result
+  // carries the raw order row under `order`.
   const orderData = completed("order");
   const order =
-    orderData && typeof orderData === "object" && !Array.isArray(orderData)
-      ? orderData
+    orderData &&
+    orderData.order &&
+    typeof orderData.order === "object" &&
+    !Array.isArray(orderData.order)
+      ? orderData.order
       : null;
 
   // The customer domain is produced by the Customer Agent (Phase 2B), whose
@@ -862,13 +984,13 @@ function buildInvestigation(results) {
 }
 // <<< PLANNER PURE LOGIC
 
-// Loads the requested order row once. A query error is logged and treated as
-// "order not available" so a database hiccup degrades instead of failing the
-// whole customer request.
-async function resolveOrderRow(
+// Loads the requested order row once. Returns the row plus the query error (if
+// any), so the Order Agent can distinguish "not found" from "query failed" while
+// a database hiccup still degrades instead of failing the whole request.
+async function resolveOrder(
   supabase: SupabaseClient,
   orderId: string,
-): Promise<JsonObject | null> {
+): Promise<{ order: JsonObject | null; error: string | null }> {
   const orderRes = await supabase
     .from("orders")
     .select("*")
@@ -878,10 +1000,10 @@ async function resolveOrderRow(
   if (orderRes.error) {
     console.error("planner order query error", orderRes.error);
 
-    return null;
+    return { order: null, error: orderRes.error.message };
   }
 
-  return (orderRes.data as JsonObject) ?? null;
+  return { order: (orderRes.data as JsonObject) ?? null, error: null };
 }
 
 // Executes ONE domain. Never throws: failures are reported as a domain result so
@@ -889,14 +1011,17 @@ async function resolveOrderRow(
 async function executeDomain(
   supabase: SupabaseClient,
   domain: string,
-  orderId: string,
-  orderRow: JsonObject | null,
+  orderLookup: { order: JsonObject | null; error: string | null },
 ): Promise<DomainResult> {
+  const orderRow = orderLookup.order;
+
   try {
     if (domain === "order") {
-      return orderRow
-        ? domainResult("order", "completed", orderRow)
-        : domainResult("order", "not_found", null);
+      // Delegated to the Order Agent (Phase 2C). It runs because the planner
+      // selected the `order` domain, and it reuses the shared order lookup.
+      const agentResult = runOrderAgent(orderLookup);
+
+      return domainResult("order", agentResult.status as string, agentResult);
     }
 
     if (domain === "delivery") {
@@ -949,9 +1074,8 @@ async function executeDomain(
 // investigation.
 async function runInvestigationPlan(
   supabase: SupabaseClient,
-  orderId: string,
   triage: { intent?: string; domains?: string[] },
-  orderRow: JsonObject | null,
+  orderLookup: { order: JsonObject | null; error: string | null },
 ): Promise<{
   plan: string[];
   results: DomainResult[];
@@ -960,7 +1084,7 @@ async function runInvestigationPlan(
   const plan = planFromTriage(triage);
 
   const results = await Promise.all(
-    plan.map((domain) => executeDomain(supabase, domain, orderId, orderRow)),
+    plan.map((domain) => executeDomain(supabase, domain, orderLookup)),
   );
 
   return { plan, results, investigation: buildInvestigation(results) };
@@ -1525,9 +1649,9 @@ Deno.serve(async (req) => {
     //
     // The order row is fetched in parallel with triage (every plan needs it), so
     // the database round-trip is hidden behind the model call.
-    const [triageRun, orderRow] = await Promise.all([
+    const [triageRun, orderLookup] = await Promise.all([
       runTriage(message),
-      resolveOrderRow(supabase, orderId),
+      resolveOrder(supabase, orderId),
     ]);
 
     const triage = triageRun.triage;
@@ -1538,9 +1662,8 @@ Deno.serve(async (req) => {
     // degrades safely instead of breaking the request.
     const planRun = await runInvestigationPlan(
       supabase,
-      orderId,
       triage,
-      orderRow,
+      orderLookup,
     );
 
     const investigation = planRun.investigation;
