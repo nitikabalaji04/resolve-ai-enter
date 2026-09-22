@@ -1433,6 +1433,284 @@ function analyzeEvidence(evidence, agentStatus, requiredDomains) {
 // <<< CONFLICT ENGINE PURE LOGIC
 
 // ======================================================================
+// RE-INVESTIGATION LOOP (Phase 5)
+// ======================================================================
+//
+// A bounded, deterministic controller that reacts to the Conflict & Uncertainty
+// Engine. It re-runs ONLY the domains responsible for a conflict or uncertainty,
+// through the existing domain executor, rebuilds evidence with the Evidence
+// Engine, and re-checks health.
+//
+// No LLM calls, no new business rules, no unbounded loop. The domain execution
+// is injected through `step`, so the loop logic itself is pure and testable.
+
+// >>> REINVESTIGATION PURE LOGIC (plain JS — extracted verbatim by reinvestigation.test.mjs)
+const MAX_REINVESTIGATION_ROUNDS = 2;
+
+// Deterministic target selection from the conflict/uncertainty output. Only
+// supported planner domains are ever targeted; anything unmappable is dropped.
+function selectReinvestigationTargets(health) {
+  const wanted = [];
+
+  const add = (candidate) => {
+    if (typeof candidate !== "string") return;
+
+    const domain = candidate.trim().toLowerCase();
+
+    if (!PLAN_ORDER.includes(domain)) return;
+    if (!wanted.includes(domain)) wanted.push(domain);
+  };
+
+  if (!health || typeof health !== "object") return wanted;
+
+  if (Array.isArray(health.conflicts)) {
+    for (const conflict of health.conflicts) {
+      if (conflict && typeof conflict === "object") add(conflict.domain);
+    }
+  }
+
+  if (Array.isArray(health.uncertainties)) {
+    for (const uncertainty of health.uncertainties) {
+      if (!uncertainty || typeof uncertainty !== "object") continue;
+
+      if (typeof uncertainty.domain === "string") {
+        add(uncertainty.domain);
+      } else if (typeof uncertainty.agent === "string") {
+        add(uncertainty.agent.replace(/_agent$/, ""));
+      }
+    }
+  }
+
+  return PLAN_ORDER.filter((domain) => wanted.includes(domain));
+}
+
+// Deterministic signature of the investigation state (normalized evidence plus
+// agent statuses). Used to detect that a round produced no change at all.
+function investigationSignature(evidence, agentStatus) {
+  const items = Array.isArray(evidence)
+    ? evidence.map((item) => [
+        item && item.agent,
+        item && item.domain,
+        item && item.finding,
+        item && item.source,
+        item && item.confidence,
+      ])
+    : [];
+
+  const statuses =
+    agentStatus && typeof agentStatus === "object" && !Array.isArray(agentStatus)
+      ? Object.keys(agentStatus)
+          .sort()
+          .map((agent) => [agent, agentStatus[agent]])
+      : [];
+
+  return JSON.stringify([items, statuses]);
+}
+
+// Merges re-run domain results over the previous ones: non-target domains keep
+// their earlier results and the merged list keeps plan order.
+function mergeDomainResults(previousResults, newResults, plan) {
+  const merged = {};
+
+  for (const result of Array.isArray(previousResults) ? previousResults : []) {
+    if (result && typeof result === "object" && typeof result.domain === "string") {
+      merged[result.domain] = result;
+    }
+  }
+
+  for (const result of Array.isArray(newResults) ? newResults : []) {
+    if (result && typeof result === "object" && typeof result.domain === "string") {
+      merged[result.domain] = result;
+    }
+  }
+
+  const order = Array.isArray(plan) ? plan : Object.keys(merged);
+  const ordered = [];
+
+  for (const domain of order) {
+    if (merged[domain]) ordered.push(merged[domain]);
+  }
+
+  return ordered;
+}
+
+// Deterministic outcome of one round.
+function reinvestmentRoundOutcome(input) {
+  const before = input.before;
+  const after = input.after;
+  const healthyNow =
+    after.conflict_status === "none" && after.uncertainty_status === "none";
+
+  if (healthyNow) {
+    return {
+      stop: true,
+      resolved: true,
+      stop_reason:
+        before.conflict_status === "detected"
+          ? "conflict_resolved"
+          : "uncertainty_resolved",
+    };
+  }
+
+  if (!input.changed) {
+    return { stop: true, resolved: false, stop_reason: "no_change" };
+  }
+
+  if (input.round >= input.maxRounds) {
+    return { stop: true, resolved: false, stop_reason: "max_rounds_reached" };
+  }
+
+  return { stop: false, resolved: false, stop_reason: null };
+}
+
+// The bounded loop. `step(domains)` performs the actual domain execution (the
+// production caller injects the existing executor); the loop itself is pure.
+async function runReinvestmentLoop(input) {
+  const src = input || {};
+  const plan = Array.isArray(src.plan) ? src.plan : [];
+  const maxRounds =
+    typeof src.maxRounds === "number" ? src.maxRounds : MAX_REINVESTIGATION_ROUNDS;
+  const step = typeof src.step === "function" ? src.step : null;
+
+  let results = Array.isArray(src.results) ? src.results : [];
+  let evidence = Array.isArray(src.evidence) ? src.evidence : [];
+  let agentStatus =
+    src.agentStatus && typeof src.agentStatus === "object" && !Array.isArray(src.agentStatus)
+      ? src.agentStatus
+      : {};
+  let health =
+    src.health && typeof src.health === "object" && !Array.isArray(src.health)
+      ? src.health
+      : {
+          conflict_status: "none",
+          uncertainty_status: "none",
+          requires_reinvestigation: false,
+          conflicts: [],
+          uncertainties: [],
+          missing_domains: [],
+        };
+
+  // Round 0 is always preserved: the initial investigation is never overwritten.
+  const history = [{ round: 0, type: "initial", evidence }];
+  const rounds = [];
+  const targetDomains = [];
+
+  const buildSummary = (performed, roundCount, resolved, stopReason) => ({
+    performed,
+    rounds: roundCount,
+    max_rounds: maxRounds,
+    target_domains: targetDomains.slice(),
+    resolved,
+    stop_reason: stopReason,
+  });
+
+  if (!health.requires_reinvestigation) {
+    return {
+      results,
+      evidence,
+      agentStatus,
+      health,
+      history,
+      rounds,
+      summary: buildSummary(false, 0, true, "not_required"),
+    };
+  }
+
+  const firstTargets = selectReinvestigationTargets(health);
+
+  if (firstTargets.length === 0 || !step) {
+    return {
+      results,
+      evidence,
+      agentStatus,
+      health,
+      history,
+      rounds,
+      summary: buildSummary(false, 0, false, "no_safe_target"),
+    };
+  }
+
+  let stopReason = null;
+  let resolved = false;
+
+  for (let round = 1; round <= maxRounds; round++) {
+    const targets =
+      round === 1 ? firstTargets : selectReinvestigationTargets(health);
+
+    if (targets.length === 0) {
+      stopReason = "no_safe_target";
+      break;
+    }
+
+    for (const domain of targets) {
+      if (!targetDomains.includes(domain)) targetDomains.push(domain);
+    }
+
+    const before = {
+      conflict_status: health.conflict_status,
+      uncertainty_status: health.uncertainty_status,
+    };
+    const beforeSignature = investigationSignature(evidence, agentStatus);
+
+    const newResults = await step(targets.slice());
+    results = mergeDomainResults(results, newResults, plan);
+
+    // Evidence is always rebuilt by the Evidence Engine — never hand-crafted here.
+    const rebuilt = buildEvidence(results.map((result) => result.data));
+    evidence = rebuilt.evidence;
+    agentStatus = rebuilt.agent_status;
+    health = analyzeEvidence(evidence, agentStatus, plan);
+
+    const after = {
+      conflict_status: health.conflict_status,
+      uncertainty_status: health.uncertainty_status,
+    };
+    const changed =
+      investigationSignature(evidence, agentStatus) !== beforeSignature;
+    const outcome = reinvestmentRoundOutcome({
+      before,
+      after,
+      changed,
+      round,
+      maxRounds,
+    });
+
+    rounds.push({
+      round,
+      target_domains: targets.slice(),
+      before,
+      after,
+      changed,
+      stopped: outcome.stop,
+      stop_reason: outcome.stop_reason,
+    });
+    history.push({
+      round,
+      type: "reinvestigation",
+      target_domains: targets.slice(),
+      evidence,
+    });
+
+    if (outcome.stop) {
+      stopReason = outcome.stop_reason;
+      resolved = outcome.resolved;
+      break;
+    }
+  }
+
+  return {
+    results,
+    evidence,
+    agentStatus,
+    health,
+    history,
+    rounds,
+    summary: buildSummary(rounds.length > 0, rounds.length, resolved, stopReason),
+  };
+}
+// <<< REINVESTIGATION PURE LOGIC
+
+// ======================================================================
 // INVESTIGATION PLANNER + DOMAIN EXECUTOR (Phase 2A)
 // ======================================================================
 //
@@ -2267,8 +2545,6 @@ Deno.serve(async (req) => {
       orderLookup,
     );
 
-    const investigation = planRun.investigation;
-
     // Phase 3: Evidence Engine — normalize the specialized agents' structured
     // results into one evidence set, available internally for future phases.
     // Aggregation only: it decides nothing and never touches the legacy
@@ -2285,6 +2561,28 @@ Deno.serve(async (req) => {
       evidenceRun.agent_status,
       planRun.plan,
     );
+
+    // Phase 5: Re-investigation Loop — bounded and deterministic, and only when
+    // the health check asked for it. It re-runs just the responsible domains
+    // through the existing domain executor and rebuilds evidence; the reasoning
+    // stage below is unchanged.
+    const reinvestigation = await runReinvestmentLoop({
+      plan: planRun.plan,
+      results: planRun.results,
+      evidence: evidenceRun.evidence,
+      agentStatus: evidenceRun.agent_status,
+      health: healthRun,
+      maxRounds: MAX_REINVESTIGATION_ROUNDS,
+      step: (domains: string[]) =>
+        Promise.all(
+          domains.map((domain) => executeDomain(supabase, domain, orderLookup)),
+        ),
+    });
+
+    // The legacy investigation object is built from the final results. When no
+    // round changed anything it is identical to the initial investigation, and it
+    // always keeps the exact shape the reasoning prompt expects.
+    const investigation = buildInvestigation(reinvestigation.results);
 
     // Step 2: build the Qwen reasoning prompt (unchanged)
     const qwenPrompt = buildQwenPrompt(message, investigation);
@@ -2310,8 +2608,8 @@ Deno.serve(async (req) => {
       "evidence",
       JSON.stringify({
         case_id: caseId,
-        count: evidenceRun.evidence.length,
-        agent_status: evidenceRun.agent_status,
+        count: reinvestigation.evidence.length,
+        agent_status: reinvestigation.agentStatus,
       }),
     );
 
@@ -2319,12 +2617,15 @@ Deno.serve(async (req) => {
       "investigation_health",
       JSON.stringify({
         case_id: caseId,
-        conflict_status: healthRun.conflict_status,
-        uncertainty_status: healthRun.uncertainty_status,
-        requires_reinvestigation: healthRun.requires_reinvestigation,
-        conflicts: healthRun.conflicts.length,
-        uncertainties: healthRun.uncertainties.length,
-        missing_domains: healthRun.missing_domains,
+        conflict_status: reinvestigation.health.conflict_status,
+        uncertainty_status: reinvestigation.health.uncertainty_status,
+        requires_reinvestigation:
+          reinvestigation.health.requires_reinvestigation,
+        conflicts: reinvestigation.health.conflicts.length,
+        uncertainties: reinvestigation.health.uncertainties.length,
+        missing_domains: reinvestigation.health.missing_domains,
+        reinvestigation: reinvestigation.summary,
+        rounds: reinvestigation.rounds,
       }),
     );
 
@@ -2341,13 +2642,20 @@ Deno.serve(async (req) => {
           results: planSummary(planRun.results),
         },
         evidence_summary: {
-          count: evidenceRun.evidence.length,
-          agent_status: evidenceRun.agent_status,
+          count: reinvestigation.evidence.length,
+          agent_status: reinvestigation.agentStatus,
         },
         investigation_health: {
-          conflict_status: healthRun.conflict_status,
-          uncertainty_status: healthRun.uncertainty_status,
-          requires_reinvestigation: healthRun.requires_reinvestigation,
+          conflict_status: reinvestigation.health.conflict_status,
+          uncertainty_status: reinvestigation.health.uncertainty_status,
+          requires_reinvestigation:
+            reinvestigation.health.requires_reinvestigation,
+          reinvestigation: {
+            performed: reinvestigation.summary.performed,
+            rounds: reinvestigation.summary.rounds,
+            resolved: reinvestigation.summary.resolved,
+            stop_reason: reinvestigation.summary.stop_reason,
+          },
         },
       });
 
