@@ -43,6 +43,13 @@ interface TriageResult {
   confidence: number;
 }
 
+// One executed investigation domain (Phase 2A).
+interface DomainResult {
+  domain: string;
+  status: string;
+  data: unknown;
+}
+
 // The row persisted to support_cases for every completed case.
 interface SupportCaseRecord {
   case_id: string;
@@ -88,7 +95,7 @@ function asObject(value: unknown): JsonObject {
 }
 
 // ======================================================================
-// STEP 1 - INVESTIGATION (evidence assembly)
+// STEP 1 - INVESTIGATION (full investigation, compatibility path)
 // ======================================================================
 
 // Step 1: investigate the customer's case.
@@ -97,68 +104,27 @@ function asObject(value: unknown): JsonObject {
 // requested order exists, the customer context is the order's owner; when it
 // does not exist, no customer is attached (a default/demo customer must never
 // be paired with an unverifiable order to manufacture a match).
-
+//
+// Phase 2A: this is now a thin compatibility wrapper over the domain planner —
+// it runs the FULL domain set (order + delivery + customer + policy) and
+// returns the same investigation shape as before. It is used as the safe
+// fallback whenever a plan cannot be trusted. The original queries now live in
+// the domain executors below, so there is a single source of truth.
 
 async function investigate(
   supabase: SupabaseClient,
   orderId: string,
 ): Promise<Investigation> {
-  const orderRes = await supabase
-    .from("orders")
-    .select("*")
-    .eq("order_id", orderId)
-    .maybeSingle();
+  const orderRow = await resolveOrderRow(supabase, orderId);
 
-  if (orderRes.error) {
-    console.error("investigate query error", orderRes.error);
-    throw new Error(orderRes.error.message);
-  }
+  const { investigation } = await runInvestigationPlan(
+    supabase,
+    orderId,
+    { domains: DOMAINS },
+    orderRow,
+  );
 
-  const order = (orderRes.data as JsonObject) ?? null;
-
-  const resolvedCustomerId =
-    order && typeof order.customer_id === "string"
-      ? order.customer_id
-      : null;
-
-  const [customerRes, ticketsRes, policyRes] = await Promise.all([
-    resolvedCustomerId
-      ? supabase
-          .from("customers")
-          .select("*")
-          .eq("customer_id", resolvedCustomerId)
-          .maybeSingle()
-      : Promise.resolve({ data: null, error: null }),
-    resolvedCustomerId
-      ? supabase
-          .from("tickets")
-          .select("*")
-          .eq("customer_id", resolvedCustomerId)
-          .order("created_date", { ascending: true })
-      : Promise.resolve({ data: [], error: null }),
-    supabase
-      .from("policies")
-      .select("*")
-      .eq("policy_type", "delivery_refund")
-      .order("policy_id", { ascending: true })
-      .limit(1)
-      .maybeSingle(),
-  ]);
-
-  for (const res of [customerRes, ticketsRes, policyRes]) {
-    if (res.error) {
-      console.error("investigate query error", res.error);
-      throw new Error(res.error.message);
-    }
-  }
-
-  return {
-    customer: (customerRes.data as JsonObject) ?? null,
-    order,
-    ticket_history: (ticketsRes.data as JsonObject[]) ?? [],
-    policy: (policyRes.data as JsonObject) ?? null,
-    customer_id: resolvedCustomerId,
-  };
+  return investigation;
 }
 
 // ======================================================================
@@ -183,7 +149,12 @@ interface LlmResult {
 
 // Sends one prompt to Qwen and returns the parsed JSON response.
 // Never throws: failures are reported through `status` so callers can escalate.
-async function askQwen(prompt: string): Promise<LlmResult> {
+// `options` is optional and defaults to the original reasoning settings, so
+// existing callers are unaffected.
+async function askQwen(
+  prompt: string,
+  options: { maxTokens?: number; temperature?: number } = {},
+): Promise<LlmResult> {
   const AI_API_TOKEN = Deno.env.get("AI_API_TOKEN_ff7071899898");
 
   if (!AI_API_TOKEN) {
@@ -206,8 +177,8 @@ async function askQwen(prompt: string): Promise<LlmResult> {
         model: AI_MODEL,
         messages: [{ role: "user", content: prompt }],
         stream: false,
-        temperature: 0.2,
-        max_tokens: 1000,
+        temperature: options.temperature ?? 0.2,
+        max_tokens: options.maxTokens ?? 1000,
       }),
     });
 
@@ -289,7 +260,7 @@ const INTENT_DOMAINS = {
   DELIVERY_DELAY: ["order", "delivery", "customer", "policy"],
   WRONG_PRODUCT: ["order", "customer", "policy"],
   DAMAGED_PRODUCT: ["order", "customer", "policy"],
-  REFUND_REQUEST: ["order", "delivery", "customer", "policy"],
+  REFUND_REQUEST: ["order", "policy", "customer"],
   DUPLICATE_PAYMENT: ["order", "customer", "policy"],
   ORDER_STATUS: ["order", "delivery", "customer"],
   UNKNOWN: ["customer", "order"],
@@ -509,7 +480,7 @@ async function runTriage(
   message: string,
 ): Promise<{ triage: TriageResult; source: string }> {
   try {
-    const result = await askQwen(buildTriagePrompt(message));
+    const result = await askQwen(buildTriagePrompt(message), { maxTokens: 250 });
 
     if (result.status === "success") {
       const validated = validateTriage(result.response);
@@ -527,6 +498,275 @@ async function runTriage(
   }
 
   return { triage: classifyByKeywords(message), source: "fallback" };
+}
+
+// ======================================================================
+// INVESTIGATION PLANNER + DOMAIN EXECUTOR (Phase 2A)
+// ======================================================================
+//
+// Turns the Triage Agent's plan into actual domain investigations. Only the
+// requested domains are executed, independent domains run in parallel, and a
+// failing domain degrades safely instead of breaking the customer request.
+//
+// The assembled investigation keeps the legacy shape
+// ({ customer, order, ticket_history, policy, customer_id }) so the existing
+// reasoning prompt and decision behavior stay unchanged.
+
+// >>> PLANNER PURE LOGIC (plain JS — extracted verbatim by planner.test.mjs)
+// Stable plan order used for execution, logs and the response payload. Every
+// supported domain must appear here (DOMAINS is the validation allowlist).
+const PLAN_ORDER = ["order", "delivery", "customer", "policy"];
+
+// Safe default when a plan cannot be trusted (mirrors the pre-Phase-2A
+// investigation, which always fetched order + customer + policy).
+const DEFAULT_PLAN = ["order", "customer", "policy"];
+
+// Normalizes the Triage plan into the domains that will actually be executed.
+//
+// The validated INTENT is authoritative: each intent has a canonical domain set
+// (INTENT_DOMAINS), which is what keeps existing decisions stable. The model's
+// own `domains` array is advisory and is unioned in, so triage's output is used
+// without letting an overly narrow model selection drop required evidence
+// (e.g. dropping `policy` from a refund request). Falls back to DEFAULT_PLAN
+// when nothing usable is present, and never invents an unsupported domain.
+function planFromTriage(triage) {
+  const wanted = [];
+
+  const add = (entry) => {
+    if (typeof entry !== "string") return;
+
+    const domain = entry.trim().toLowerCase();
+
+    if (!DOMAINS.includes(domain)) return;
+    if (!wanted.includes(domain)) wanted.push(domain);
+  };
+
+  const intent =
+    triage && typeof triage.intent === "string"
+      ? triage.intent.trim().toUpperCase()
+      : "";
+
+  const canonical = INTENT_DOMAINS[intent];
+
+  if (Array.isArray(canonical)) canonical.forEach(add);
+
+  if (triage && Array.isArray(triage.domains)) triage.domains.forEach(add);
+
+  if (wanted.length === 0) return DEFAULT_PLAN.slice();
+
+  return PLAN_ORDER.filter((domain) => wanted.includes(domain));
+}
+
+// Delivery view of an order row. Derived only from stored fields — nothing is
+// inferred or invented.
+function deliverySnapshot(order) {
+  if (!order || typeof order !== "object" || Array.isArray(order)) return null;
+
+  const days =
+    typeof order.delivery_days_delayed === "number"
+      ? order.delivery_days_delayed
+      : null;
+
+  return {
+    status: typeof order.status === "string" ? order.status : null,
+    shipping_type:
+      typeof order.shipping_type === "string" ? order.shipping_type : null,
+    expected_delivery:
+      typeof order.expected_delivery === "string"
+        ? order.expected_delivery
+        : null,
+    actual_delivery:
+      typeof order.actual_delivery === "string" ? order.actual_delivery : null,
+    delivery_days_delayed: days,
+    delayed: days !== null && days > 0,
+    delivered: order.status === "delivered",
+  };
+}
+
+function domainResult(domain, status, data) {
+  return { domain, status, data: data === undefined ? null : data };
+}
+
+// Assembles the legacy investigation object from executed domain results only.
+// A domain that was not requested, was not found, or failed is simply absent
+// (null / empty array) — never substituted with other data.
+function buildInvestigation(results) {
+  const byDomain = {};
+
+  for (const result of results) {
+    byDomain[result.domain] = result;
+  }
+
+  const completed = (domain) => {
+    const result = byDomain[domain];
+
+    return result && result.status === "completed" ? result.data : null;
+  };
+
+  const orderData = completed("order");
+  const order =
+    orderData && typeof orderData === "object" && !Array.isArray(orderData)
+      ? orderData
+      : null;
+
+  const customerData = completed("customer");
+  const customer =
+    customerData && customerData.customer && typeof customerData.customer === "object"
+      ? customerData.customer
+      : null;
+  const tickets =
+    customerData && Array.isArray(customerData.tickets)
+      ? customerData.tickets
+      : [];
+
+  const policyData = completed("policy");
+
+  // customer_id comes from the order owner first (legacy behavior); the customer
+  // domain can supply it when the order domain was not requested.
+  let customerId = order && typeof order.customer_id === "string"
+    ? order.customer_id
+    : null;
+
+  if (
+    !customerId &&
+    customerData &&
+    typeof customerData.customer_id === "string"
+  ) {
+    customerId = customerData.customer_id;
+  }
+
+  return {
+    customer,
+    order,
+    ticket_history: tickets,
+    policy: policyData && typeof policyData === "object" ? policyData : null,
+    customer_id: customerId,
+  };
+}
+// <<< PLANNER PURE LOGIC
+
+// Loads the requested order row once. A query error is logged and treated as
+// "order not available" so a database hiccup degrades instead of failing the
+// whole customer request.
+async function resolveOrderRow(
+  supabase: SupabaseClient,
+  orderId: string,
+): Promise<JsonObject | null> {
+  const orderRes = await supabase
+    .from("orders")
+    .select("*")
+    .eq("order_id", orderId)
+    .maybeSingle();
+
+  if (orderRes.error) {
+    console.error("planner order query error", orderRes.error);
+
+    return null;
+  }
+
+  return (orderRes.data as JsonObject) ?? null;
+}
+
+// Executes ONE domain. Never throws: failures are reported as a domain result so
+// the rest of the plan still runs.
+async function executeDomain(
+  supabase: SupabaseClient,
+  domain: string,
+  orderId: string,
+  orderRow: JsonObject | null,
+): Promise<DomainResult> {
+  try {
+    if (domain === "order") {
+      return orderRow
+        ? domainResult("order", "completed", orderRow)
+        : domainResult("order", "not_found", null);
+    }
+
+    if (domain === "delivery") {
+      const snapshot = deliverySnapshot(orderRow);
+
+      return snapshot
+        ? domainResult("delivery", "completed", snapshot)
+        : domainResult("delivery", "not_found", null);
+    }
+
+    if (domain === "customer") {
+      const customerId =
+        orderRow && typeof orderRow.customer_id === "string"
+          ? orderRow.customer_id
+          : null;
+
+      if (!customerId) {
+        return domainResult("customer", "not_found", null);
+      }
+
+      const [customerRes, ticketsRes] = await Promise.all([
+        supabase
+          .from("customers")
+          .select("*")
+          .eq("customer_id", customerId)
+          .maybeSingle(),
+        supabase
+          .from("tickets")
+          .select("*")
+          .eq("customer_id", customerId)
+          .order("created_date", { ascending: true }),
+      ]);
+
+      if (customerRes.error) throw new Error(customerRes.error.message);
+      if (ticketsRes.error) throw new Error(ticketsRes.error.message);
+
+      return domainResult("customer", "completed", {
+        customer_id: customerId,
+        customer: (customerRes.data as JsonObject) ?? null,
+        tickets: (ticketsRes.data as JsonObject[]) ?? [],
+      });
+    }
+
+    if (domain === "policy") {
+      const policyRes = await supabase
+        .from("policies")
+        .select("*")
+        .eq("policy_type", "delivery_refund")
+        .order("policy_id", { ascending: true })
+        .limit(1)
+        .maybeSingle();
+
+      if (policyRes.error) throw new Error(policyRes.error.message);
+
+      return policyRes.data
+        ? domainResult("policy", "completed", policyRes.data)
+        : domainResult("policy", "not_found", null);
+    }
+
+    return domainResult(domain, "unsupported", null);
+  } catch (error) {
+    console.error(`domain investigation failed: ${domain}`, error);
+
+    return domainResult(domain, "failed", null);
+  }
+}
+
+// Runs the dynamic plan: only the requested domains, in parallel, reusing the
+// existing queries. Returns the plan, the per-domain results and the assembled
+// investigation.
+async function runInvestigationPlan(
+  supabase: SupabaseClient,
+  orderId: string,
+  triage: { intent?: string; domains?: string[] },
+  orderRow: JsonObject | null,
+): Promise<{
+  plan: string[];
+  results: DomainResult[];
+  investigation: Investigation;
+}> {
+  const plan = planFromTriage(triage);
+
+  const results = await Promise.all(
+    plan.map((domain) => executeDomain(supabase, domain, orderId, orderRow)),
+  );
+
+  return { plan, results, investigation: buildInvestigation(results) };
 }
 
 // ======================================================================
@@ -1065,39 +1305,71 @@ Deno.serve(async (req) => {
     // Generate a unique case ID for every support request
     const caseId = `CASE-${crypto.randomUUID().replace(/-/g, "").slice(0, 8).toUpperCase()}`;
 
-    // Step 1: investigate the customer's case.
-    // The order is authoritative: the customer context is resolved from the
-    // order's owner, and a nonexistent order never gets a customer attached.
-    const investigation = await investigate(supabase, orderId);
-
-    // Step 2: build the Qwen reasoning prompt
-    const qwenPrompt = buildQwenPrompt(message, investigation);
-
-    // Step 0 + Step 3: the Triage Agent and the existing reasoning call run in
-    // parallel, so triage adds no extra latency to the customer's request.
-    // Triage can never block the pipeline: on any failure it falls back to
-    // deterministic classification.
+    // Step 0: Triage Agent — classify the complaint and produce the
+    // investigation plan. Triage can never block the pipeline: on any failure it
+    // falls back to deterministic classification. Its output is small, so the
+    // call uses a short token cap to stay fast.
     //
-    // The triage result is attached to the response (additive) so later phases
-    // can drive investigation from it. It is deliberately NOT injected into the
-    // reasoning prompt, so existing decisions are unchanged.
-    const [triageRun, qwenResult] = await Promise.all([
+    // The order row is fetched in parallel with triage (every plan needs it), so
+    // the database round-trip is hidden behind the model call.
+    const [triageRun, orderRow] = await Promise.all([
       runTriage(message),
-      askQwen(qwenPrompt),
+      resolveOrderRow(supabase, orderId),
     ]);
 
     const triage = triageRun.triage;
     const triageSource = triageRun.source;
+
+    // Step 1: Dynamic Investigation Plan — execute ONLY the domains triage
+    // requested. Independent domains run in parallel and a failing domain
+    // degrades safely instead of breaking the request.
+    const planRun = await runInvestigationPlan(
+      supabase,
+      orderId,
+      triage,
+      orderRow,
+    );
+
+    const investigation = planRun.investigation;
+
+    // Step 2: build the Qwen reasoning prompt (unchanged)
+    const qwenPrompt = buildQwenPrompt(message, investigation);
+
+    // Step 3: ask Qwen to reason about the case (unchanged)
+    const qwenResult = await askQwen(qwenPrompt);
 
     console.log(
       "triage",
       JSON.stringify({ case_id: caseId, ...triage, source: triageSource }),
     );
 
-    // Every successful response carries the triage plan (existing keys and
-    // values are unchanged).
+    console.log(
+      "investigation_plan",
+      JSON.stringify({
+        case_id: caseId,
+        plan: planRun.plan,
+        results: planRun.results.map((result) => ({
+          domain: result.domain,
+          status: result.status,
+        })),
+      }),
+    );
+
+    // Every successful response carries the triage result and the executed plan
+    // (additive; existing keys and values are unchanged).
     const respond = (payload: JsonObject) =>
-      json({ ...payload, triage, triage_source: triageSource });
+      json({
+        ...payload,
+        triage,
+        triage_source: triageSource,
+        investigation_plan: {
+          domains: planRun.plan,
+          results: planRun.results.map((result) => ({
+            domain: result.domain,
+            status: result.status,
+          })),
+        },
+      });
 
     // Step 4: if Qwen is unavailable, escalate
     if (qwenResult.status !== "success") {
