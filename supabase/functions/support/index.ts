@@ -34,6 +34,15 @@ interface Investigation {
   customer_id: string | null;
 }
 
+// The Triage Agent's structured classification (Phase 1).
+interface TriageResult {
+  intent: string;
+  urgency: string;
+  domains: string[];
+  reason: string;
+  confidence: number;
+}
+
 // The row persisted to support_cases for every completed case.
 interface SupportCaseRecord {
   case_id: string;
@@ -248,6 +257,276 @@ async function askQwen(prompt: string): Promise<LlmResult> {
       message: error instanceof Error ? error.message : "Unknown AI error",
     };
   }
+}
+
+// ======================================================================
+// TRIAGE AGENT (Phase 1)
+// ======================================================================
+//
+// Classifies the complaint into a structured intent, urgency and investigation
+// plan before the existing investigation runs. Additive only: the triage result
+// is attached to the response for later phases and never changes the existing
+// reasoning prompt, decision, refund or escalation behavior.
+
+// >>> TRIAGE PURE LOGIC (plain JS — extracted verbatim by triage.test.mjs)
+const INTENTS = [
+  "DELIVERY_DELAY",
+  "WRONG_PRODUCT",
+  "DAMAGED_PRODUCT",
+  "REFUND_REQUEST",
+  "DUPLICATE_PAYMENT",
+  "ORDER_STATUS",
+  "UNKNOWN",
+];
+
+const URGENCIES = ["low", "normal", "high", "urgent"];
+
+const DOMAINS = ["customer", "order", "delivery", "policy"];
+
+// Investigation plan per intent: which evidence domains matter. This is what
+// makes the plan dynamic instead of one hard-coded path for every complaint.
+const INTENT_DOMAINS = {
+  DELIVERY_DELAY: ["order", "delivery", "customer", "policy"],
+  WRONG_PRODUCT: ["order", "customer", "policy"],
+  DAMAGED_PRODUCT: ["order", "customer", "policy"],
+  REFUND_REQUEST: ["order", "delivery", "customer", "policy"],
+  DUPLICATE_PAYMENT: ["order", "customer", "policy"],
+  ORDER_STATUS: ["order", "delivery", "customer"],
+  UNKNOWN: ["customer", "order"],
+};
+
+// Ordered keyword rules used by the deterministic fallback classifier. Order
+// matters: more specific intents are matched before generic ones.
+const INTENT_KEYWORDS = [
+  [
+    "DUPLICATE_PAYMENT",
+    [
+      "charged twice",
+      "charge twice",
+      "double charge",
+      "duplicate payment",
+      "duplicate charge",
+      "two charges",
+      "billed twice",
+    ],
+  ],
+  [
+    "DAMAGED_PRODUCT",
+    ["damaged", "broken", "cracked", "defective", "dented", "scratch", "faulty"],
+  ],
+  [
+    "WRONG_PRODUCT",
+    [
+      "wrong product",
+      "wrong item",
+      "wrong colour",
+      "wrong color",
+      "wrong model",
+      "different product",
+      "different item",
+      "incorrect item",
+      "not what i ordered",
+    ],
+  ],
+  [
+    "REFUND_REQUEST",
+    ["refund", "money back", "compensation", "compensate", "reimburse"],
+  ],
+  [
+    "DELIVERY_DELAY",
+    [
+      "delayed",
+      "delay",
+      "late",
+      "not arrived",
+      "hasn't arrived",
+      "has not arrived",
+      "still waiting",
+      "not delivered",
+      "still not received",
+    ],
+  ],
+  [
+    "ORDER_STATUS",
+    ["status", "tracking", "track", "where is", "when will", "how long"],
+  ],
+];
+
+function domainsForIntent(intent) {
+  const domains = INTENT_DOMAINS[intent] || INTENT_DOMAINS.UNKNOWN;
+
+  return domains.slice();
+}
+
+function urgencyForIntent(intent, text) {
+  if (
+    text.includes("urgent") ||
+    text.includes("asap") ||
+    text.includes("immediately")
+  ) {
+    return "urgent";
+  }
+
+  if (intent === "DUPLICATE_PAYMENT" || intent === "DAMAGED_PRODUCT") {
+    return "high";
+  }
+
+  if (text.includes("weeks") || text.includes("still not")) {
+    return "high";
+  }
+
+  return "normal";
+}
+
+// Deterministic classifier: the safe fallback when the LLM is unavailable or
+// returns output that fails validation.
+function classifyByKeywords(message) {
+  const text = typeof message === "string" ? message.toLowerCase() : "";
+
+  for (const [intent, keywords] of INTENT_KEYWORDS) {
+    for (const keyword of keywords) {
+      if (text.includes(keyword)) {
+        return {
+          intent,
+          urgency: urgencyForIntent(intent, text),
+          domains: domainsForIntent(intent),
+          reason: `Deterministic triage matched "${keyword}" for ${intent}.`,
+          confidence: 0.45,
+        };
+      }
+    }
+  }
+
+  return {
+    intent: "UNKNOWN",
+    urgency: "normal",
+    domains: domainsForIntent("UNKNOWN"),
+    reason: "No supported intent keyword matched the message.",
+    confidence: 0.2,
+  };
+}
+
+// Strict validation of the Triage Agent's JSON. Returns the normalized triage
+// object, or null when anything is missing, out of range or unsupported.
+function validateTriage(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+
+  const intent =
+    typeof value.intent === "string" ? value.intent.trim().toUpperCase() : "";
+
+  if (!INTENTS.includes(intent)) {
+    return null;
+  }
+
+  const urgency =
+    typeof value.urgency === "string" ? value.urgency.trim().toLowerCase() : "";
+
+  if (!URGENCIES.includes(urgency)) {
+    return null;
+  }
+
+  if (!Array.isArray(value.domains)) {
+    return null;
+  }
+
+  const domains = [];
+
+  for (const entry of value.domains) {
+    if (typeof entry !== "string") {
+      return null;
+    }
+
+    const domain = entry.trim().toLowerCase();
+
+    if (!DOMAINS.includes(domain)) {
+      return null;
+    }
+
+    if (!domains.includes(domain)) {
+      domains.push(domain);
+    }
+  }
+
+  if (domains.length === 0) {
+    return null;
+  }
+
+  if (typeof value.reason !== "string" || value.reason.trim() === "") {
+    return null;
+  }
+
+  if (typeof value.confidence !== "number" || !Number.isFinite(value.confidence)) {
+    return null;
+  }
+
+  if (value.confidence < 0 || value.confidence > 1) {
+    return null;
+  }
+
+  return {
+    intent,
+    urgency,
+    domains,
+    reason: value.reason.trim(),
+    confidence: value.confidence,
+  };
+}
+
+function buildTriagePrompt(message) {
+  return `You are ResolveAI's Triage Agent. Classify one customer support request BEFORE any investigation happens.
+
+CUSTOMER MESSAGE:
+${message}
+
+Return ONLY valid JSON in this exact structure:
+{
+  "intent": "ORDER_STATUS",
+  "urgency": "normal",
+  "domains": ["order", "delivery", "customer"],
+  "reason": "Customer asks where their order is",
+  "confidence": 0.9
+}
+
+Rules:
+- "intent" MUST be exactly one of: DELIVERY_DELAY, WRONG_PRODUCT, DAMAGED_PRODUCT, REFUND_REQUEST, DUPLICATE_PAYMENT, ORDER_STATUS, UNKNOWN
+- "urgency" MUST be exactly one of: low, normal, high, urgent
+- "domains" MUST be a non-empty array containing only: customer, order, delivery, policy
+- Choose ONLY the domains that are actually relevant to the classified intent.
+- "reason" MUST be a short one-sentence explanation of the classification.
+- "confidence" MUST be a number between 0 and 1.
+- Use UNKNOWN only when no supported intent fits the message.
+- Do not include markdown, explanations outside the JSON, or code fences.
+`;
+}
+// <<< TRIAGE PURE LOGIC
+
+// Runs the Triage Agent: LLM classification validated against the strict schema,
+// falling back to the deterministic classifier so triage can never break the
+// customer flow.
+async function runTriage(
+  message: string,
+): Promise<{ triage: TriageResult; source: string }> {
+  try {
+    const result = await askQwen(buildTriagePrompt(message));
+
+    if (result.status === "success") {
+      const validated = validateTriage(result.response);
+
+      if (validated) {
+        return { triage: validated, source: "llm" };
+      }
+
+      console.error("triage output failed validation", result.response);
+    } else {
+      console.error("triage LLM unavailable", result.message);
+    }
+  } catch (error) {
+    console.error("triage error", error);
+  }
+
+  return { triage: classifyByKeywords(message), source: "fallback" };
 }
 
 // ======================================================================
@@ -794,8 +1073,31 @@ Deno.serve(async (req) => {
     // Step 2: build the Qwen reasoning prompt
     const qwenPrompt = buildQwenPrompt(message, investigation);
 
-    // Step 3: ask Qwen to reason about the case
-    const qwenResult = await askQwen(qwenPrompt);
+    // Step 0 + Step 3: the Triage Agent and the existing reasoning call run in
+    // parallel, so triage adds no extra latency to the customer's request.
+    // Triage can never block the pipeline: on any failure it falls back to
+    // deterministic classification.
+    //
+    // The triage result is attached to the response (additive) so later phases
+    // can drive investigation from it. It is deliberately NOT injected into the
+    // reasoning prompt, so existing decisions are unchanged.
+    const [triageRun, qwenResult] = await Promise.all([
+      runTriage(message),
+      askQwen(qwenPrompt),
+    ]);
+
+    const triage = triageRun.triage;
+    const triageSource = triageRun.source;
+
+    console.log(
+      "triage",
+      JSON.stringify({ case_id: caseId, ...triage, source: triageSource }),
+    );
+
+    // Every successful response carries the triage plan (existing keys and
+    // values are unchanged).
+    const respond = (payload: JsonObject) =>
+      json({ ...payload, triage, triage_source: triageSource });
 
     // Step 4: if Qwen is unavailable, escalate
     if (qwenResult.status !== "success") {
@@ -833,7 +1135,7 @@ Deno.serve(async (req) => {
         case_status: "escalated",
       });
 
-      return json({
+      return respond({
         case_id: caseId,
         customer_message: message,
         investigation,
@@ -890,7 +1192,7 @@ Deno.serve(async (req) => {
         case_status: "escalated",
       });
 
-      return json({
+      return respond({
         case_id: caseId,
         customer_message: message,
         investigation,
@@ -948,7 +1250,7 @@ Deno.serve(async (req) => {
         case_status: "escalated",
       });
 
-      return json({
+      return respond({
         case_id: caseId,
         customer_message: message,
         investigation,
@@ -1011,7 +1313,7 @@ Deno.serve(async (req) => {
           case_status: "escalated",
         });
 
-        return json({
+        return respond({
           case_id: caseId,
           customer_message: message,
           investigation,
@@ -1044,7 +1346,7 @@ Deno.serve(async (req) => {
         case_status: null,
       });
 
-      return json({
+      return respond({
         case_id: caseId,
         customer_message: message,
         investigation,
@@ -1107,7 +1409,7 @@ Deno.serve(async (req) => {
       case_status: null,
     });
 
-    return json({
+    return respond({
       case_id: caseId,
       customer_message: message,
       investigation,
