@@ -1077,6 +1077,129 @@ async function runPolicyAgent(supabase: SupabaseClient): Promise<JsonObject> {
 }
 
 // ======================================================================
+// EVIDENCE ENGINE (Phase 3)
+// ======================================================================
+//
+// Aggregation layer between the specialized agents and the reasoning stage. It
+// answers exactly one question: "which facts did the investigation agents
+// return, and where did each fact come from?"
+//
+// It is NOT a decision maker: no LLM, no policy interpretation, no conflict
+// resolution, no new business rules, no reinterpretation of agent findings.
+// Every evidence item is copied verbatim from an agent's findings, keeping its
+// source and confidence exactly as supplied.
+
+// >>> EVIDENCE ENGINE PURE LOGIC (plain JS — extracted verbatim by evidence-engine.test.mjs)
+// The agents whose results this engine understands. Taken from the agents' own
+// name constants so the contract cannot silently drift.
+const SUPPORTED_AGENTS = [
+  ORDER_AGENT_NAME,
+  DELIVERY_AGENT_NAME,
+  CUSTOMER_AGENT_NAME,
+  POLICY_AGENT_NAME,
+];
+
+// Deterministic evidence id: EV-001, EV-002, ... (never a random UUID).
+function evidenceId(index) {
+  return "EV-" + String(index + 1).padStart(3, "0");
+}
+
+// Normalizes ONE agent result into evidence items (0..n). Anything unsupported,
+// malformed, non-completed, or without findings yields no evidence.
+function evidenceFromAgentResult(result) {
+  if (!result || typeof result !== "object" || Array.isArray(result)) return [];
+
+  if (typeof result.agent !== "string" || !SUPPORTED_AGENTS.includes(result.agent)) {
+    return [];
+  }
+
+  if (result.status !== "completed") return [];
+  if (typeof result.domain !== "string" || result.domain.trim() === "") return [];
+  if (!Array.isArray(result.findings)) return [];
+
+  const items = [];
+
+  for (const finding of result.findings) {
+    if (!finding || typeof finding !== "object" || Array.isArray(finding)) continue;
+    if (typeof finding.finding !== "string" || finding.finding.trim() === "") continue;
+    if (typeof finding.source !== "string" || finding.source.trim() === "") continue;
+    if (typeof finding.confidence !== "number" || !Number.isFinite(finding.confidence)) {
+      continue;
+    }
+
+    items.push({
+      agent: result.agent,
+      domain: result.domain,
+      finding: finding.finding,
+      source: finding.source,
+      confidence: finding.confidence,
+    });
+  }
+
+  return items;
+}
+
+// Exact-match dedupe key: all five evidence fields must be identical. Similar
+// findings, or the same finding from a different source, are never merged.
+function evidenceKey(item) {
+  return JSON.stringify([
+    item.agent,
+    item.domain,
+    item.finding,
+    item.source,
+    item.confidence,
+  ]);
+}
+
+// buildEvidence(agentResults) -> { evidence, agent_status }
+//
+// Deterministic: results are consumed in the order the planner produced them,
+// findings in their stored order, and the first occurrence wins on duplicates.
+// The input is never mutated.
+function buildEvidence(agentResults) {
+  const results = Array.isArray(agentResults) ? agentResults : [];
+
+  const collected = [];
+  const seen = new Set();
+  const agentStatus = {};
+
+  for (const result of results) {
+    if (!result || typeof result !== "object" || Array.isArray(result)) continue;
+
+    const agent = typeof result.agent === "string" ? result.agent : null;
+
+    if (!agent || !SUPPORTED_AGENTS.includes(agent)) continue;
+
+    // Compact status summary for future conflict/uncertainty detection. Only
+    // agents that actually reported are recorded — never invented.
+    if (typeof result.status === "string") agentStatus[agent] = result.status;
+
+    for (const item of evidenceFromAgentResult(result)) {
+      const key = evidenceKey(item);
+
+      if (seen.has(key)) continue;
+
+      seen.add(key);
+      collected.push(item);
+    }
+  }
+
+  const evidence = collected.map(function (item, index) {
+    return {
+      id: evidenceId(index),
+      agent: item.agent,
+      domain: item.domain,
+      finding: item.finding,
+      source: item.source,
+      confidence: item.confidence,
+    };
+  });
+
+  return { evidence, agent_status: agentStatus };
+}
+// <<< EVIDENCE ENGINE PURE LOGIC
+
+// ======================================================================
 // INVESTIGATION PLANNER + DOMAIN EXECUTOR (Phase 2A)
 // ======================================================================
 //
@@ -1913,6 +2036,14 @@ Deno.serve(async (req) => {
 
     const investigation = planRun.investigation;
 
+    // Phase 3: Evidence Engine — normalize the specialized agents' structured
+    // results into one evidence set, available internally for future phases.
+    // Aggregation only: it decides nothing and never touches the legacy
+    // investigation object that the reasoning stage consumes.
+    const evidenceRun = buildEvidence(
+      planRun.results.map((result) => result.data),
+    );
+
     // Step 2: build the Qwen reasoning prompt (unchanged)
     const qwenPrompt = buildQwenPrompt(message, investigation);
 
@@ -1933,8 +2064,18 @@ Deno.serve(async (req) => {
       }),
     );
 
-    // Every successful response carries the triage result and the executed plan
-    // (additive; existing keys and values are unchanged).
+    console.log(
+      "evidence",
+      JSON.stringify({
+        case_id: caseId,
+        count: evidenceRun.evidence.length,
+        agent_status: evidenceRun.agent_status,
+      }),
+    );
+
+    // Every successful response carries the triage result, the executed plan and
+    // a minimal evidence summary (additive; existing keys and values are
+    // unchanged).
     const respond = (payload: JsonObject) =>
       json({
         ...payload,
@@ -1943,6 +2084,10 @@ Deno.serve(async (req) => {
         investigation_plan: {
           domains: planRun.plan,
           results: planSummary(planRun.results),
+        },
+        evidence_summary: {
+          count: evidenceRun.evidence.length,
+          agent_status: evidenceRun.agent_status,
         },
       });
 
