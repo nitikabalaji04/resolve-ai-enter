@@ -1711,6 +1711,135 @@ async function runReinvestmentLoop(input) {
 // <<< REINVESTIGATION PURE LOGIC
 
 // ======================================================================
+// DECISION GATE (Phase 6)
+// ======================================================================
+//
+// A deterministic safety gate over the FINAL investigation state. It answers one
+// question only: "is there enough reliable investigation evidence to allow the
+// automated reasoning/decision path to run?"
+//
+// It never makes a business decision (no approve/deny/refund/escalate), performs
+// no database calls, calls no LLM, mutates nothing and never throws.
+
+// >>> DECISION GATE PURE LOGIC (plain JS — extracted verbatim by decision-gate.test.mjs)
+const GATE_PROCEED = "PROCEED";
+const GATE_BLOCK = "BLOCK";
+const GATE_SUFFICIENT = "INVESTIGATION_SUFFICIENT";
+
+// Agent result statuses that block the gate, with their machine-readable code.
+const GATE_BLOCKING_STATUS_CODES = {
+  failed: "AGENT_FAILED",
+  not_found: "AGENT_NOT_FOUND",
+  unsupported: "AGENT_UNSUPPORTED",
+};
+
+// evaluateDecisionGate({ plan, agentResults, evidence, investigationHealth,
+//                        reinvestigation }) -> { status, reason, reasons }
+//
+// PROCEED only when the final plan is fully, reliably investigated. Blocking
+// reasons are ordered most-specific-first (per required domain, in plan order),
+// followed by the investigation-health flags, so `reason` is the primary cause.
+function evaluateDecisionGate(input) {
+  const src = input || {};
+  const plan = Array.isArray(src.plan) ? src.plan : [];
+  const agentResults = Array.isArray(src.agentResults) ? src.agentResults : [];
+  const evidence = Array.isArray(src.evidence) ? src.evidence : [];
+  const health =
+    src.investigationHealth &&
+    typeof src.investigationHealth === "object" &&
+    !Array.isArray(src.investigationHealth)
+      ? src.investigationHealth
+      : {};
+  const reinvestigation =
+    src.reinvestigation &&
+    typeof src.reinvestigation === "object" &&
+    !Array.isArray(src.reinvestigation)
+      ? src.reinvestigation
+      : {};
+
+  const reasons = [];
+
+  const addReason = (code, extra) => {
+    const reason = { code };
+
+    if (extra && typeof extra.domain === "string") reason.domain = extra.domain;
+    if (extra && typeof extra.agent === "string") reason.agent = extra.agent;
+
+    reasons.push(reason);
+  };
+
+  // Index the final domain results by domain.
+  const byDomain = {};
+
+  for (const result of agentResults) {
+    if (result && typeof result === "object" && !Array.isArray(result)) {
+      if (typeof result.domain === "string") byDomain[result.domain] = result;
+    }
+  }
+
+  // Per required domain (from the FINAL plan — never hard-coded).
+  for (const rawDomain of plan) {
+    if (typeof rawDomain !== "string" || rawDomain.trim() === "") continue;
+
+    const domain = rawDomain.trim().toLowerCase();
+    const agent = domain + "_agent";
+    const result = byDomain[domain];
+
+    if (!result) {
+      addReason("REQUIRED_DOMAIN_MISSING", { domain, agent });
+      continue;
+    }
+
+    const status = typeof result.status === "string" ? result.status : "";
+    const blockingCode = GATE_BLOCKING_STATUS_CODES[status];
+
+    if (blockingCode) {
+      addReason(blockingCode, { domain, agent });
+      continue;
+    }
+
+    if (status !== "completed") {
+      addReason("AGENT_UNSUPPORTED", { domain, agent });
+      continue;
+    }
+
+    // A completed domain is expected to contribute usable evidence.
+    const hasEvidence = evidence.some(function (item) {
+      return (
+        item &&
+        typeof item === "object" &&
+        item.domain === domain &&
+        typeof item.id === "string"
+      );
+    });
+
+    if (!hasEvidence) {
+      addReason("REQUIRED_EVIDENCE_MISSING", { domain, agent });
+    }
+  }
+
+  // Investigation-health flags (also honour an unresolved re-investigation).
+  // Ordered most-specific-first so `reason` names the actionable cause: a
+  // detected conflict or uncertainty leads, and the derived "reinvestigation
+  // required" signal comes last.
+  if (health.conflict_status === "detected") addReason("CONFLICT_PRESENT");
+  if (health.uncertainty_status === "detected") addReason("UNCERTAINTY_PRESENT");
+
+  const reinvestigationRequired =
+    health.requires_reinvestigation === true ||
+    (reinvestigation.performed === true && reinvestigation.resolved === false);
+
+  if (reinvestigationRequired) addReason("REINVESTIGATION_REQUIRED");
+
+  if (reasons.length === 0) {
+    return { status: GATE_PROCEED, reason: GATE_SUFFICIENT, reasons };
+  }
+
+  return { status: GATE_BLOCK, reason: reasons[0].code, reasons };
+}
+// <<< DECISION GATE PURE LOGIC
+
+// ======================================================================
 // INVESTIGATION PLANNER + DOMAIN EXECUTOR (Phase 2A)
 // ======================================================================
 //
@@ -2584,6 +2713,22 @@ Deno.serve(async (req) => {
     // always keeps the exact shape the reasoning prompt expects.
     const investigation = buildInvestigation(reinvestigation.results);
 
+    // Phase 6: Decision Gate — deterministic safety check over the FINAL state
+    // (final plan, final agent results, final evidence, final health and the
+    // re-investigation outcome).
+    //
+    // In this phase the gate is a safety/observability layer only: it never makes
+    // a business decision and does not alter the existing pipeline, so current API
+    // behaviour cannot break. Wiring it to final decision control (including
+    // skipping reasoning on BLOCK) is the Decision Agent phase.
+    const decisionGate = evaluateDecisionGate({
+      plan: planRun.plan,
+      agentResults: reinvestigation.results,
+      evidence: reinvestigation.evidence,
+      investigationHealth: reinvestigation.health,
+      reinvestigation: reinvestigation.summary,
+    });
+
     // Step 2: build the Qwen reasoning prompt (unchanged)
     const qwenPrompt = buildQwenPrompt(message, investigation);
 
@@ -2629,6 +2774,16 @@ Deno.serve(async (req) => {
       }),
     );
 
+    console.log(
+      "decision_gate",
+      JSON.stringify({
+        case_id: caseId,
+        status: decisionGate.status,
+        reason: decisionGate.reason,
+        reasons: decisionGate.reasons,
+      }),
+    );
+
     // Every successful response carries the triage result, the executed plan, a
     // minimal evidence summary and the investigation health (additive; existing
     // keys and values are unchanged).
@@ -2656,6 +2811,11 @@ Deno.serve(async (req) => {
             resolved: reinvestigation.summary.resolved,
             stop_reason: reinvestigation.summary.stop_reason,
           },
+        },
+        decision_gate: {
+          status: decisionGate.status,
+          reason: decisionGate.reason,
+          reasons: decisionGate.reasons,
         },
       });
 
