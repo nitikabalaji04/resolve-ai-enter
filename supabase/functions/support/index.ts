@@ -1,28 +1,31 @@
 // ResolveAI support backend function.
 //
-// Mirrors the original ResolveAI Python backend (POST /api/support) so the
-// response structure stays identical:
-//   case_id, customer_message, investigation, qwen_response, decision,
-//   action_result, action_status, verification_status, resolution_status,
-//   customer_response, escalation_case (only on escalation paths).
+// Modular single-file layout: the pipeline stages below are self-contained
+// modules (types, http, investigation, llm, prompt, decision, actions,
+// escalation, customer response, persistence) orchestrated by Deno.serve at the
+// bottom. The public contract and every response shape are unchanged.
+//
+// NOTE: the Enter deploy bundler ships only this index.ts, so the modules live
+// here as clearly separated sections rather than separate files.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.4";
 
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers":
-    "authorization, x-client-info, apikey, content-type, x-session-id",
-};
+// ======================================================================
+// SHARED TYPES
+// ======================================================================
 
-const AI_API_URL = "https://api.enter.pro/code/api/v1/ai/chat/completions";
-const AI_MODEL = "alibaba/qwen-3.7-plus";
-const ENTER_PROJECT_ID = "ff70718998987a15db5307804a6d9c00";
+// Shared types for the ResolveAI backend functions.
+//
+// These are internal types only — they describe the existing data shapes and do
+// not change any behavior or the public support API contract.
 
-const ALLOWED_DECISIONS = new Set(["inform", "approve", "deny", "escalate"]);
-const ALLOWED_ACTIONS = new Set(["refund_shipping_fee", "human_review", "no_action"]);
 
 type JsonObject = Record<string, unknown>;
 
+// The service-role Supabase client used by the backend functions.
+type SupabaseClient = ReturnType<typeof createClient>;
+
+// The evidence assembled for one support case (Step 1: investigate).
 interface Investigation {
   customer: JsonObject | null;
   order: JsonObject | null;
@@ -30,6 +33,37 @@ interface Investigation {
   policy: JsonObject | null;
   customer_id: string | null;
 }
+
+// The row persisted to support_cases for every completed case.
+interface SupportCaseRecord {
+  case_id: string;
+  customer_id: string | null;
+  order_id: string;
+  customer_message: string;
+  intent: string;
+  decision: string;
+  reason: string;
+  action: string;
+  evidence: unknown[];
+  action_status: string;
+  verification_status: string;
+  resolution_status: string;
+  escalation_reason: string | null;
+  case_status: string | null;
+}
+
+// ======================================================================
+// HTTP HELPERS
+// ======================================================================
+
+// Shared HTTP helpers for the ResolveAI backend functions.
+
+
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers":
+    "authorization, x-client-info, apikey, content-type, x-session-id",
+};
 
 function json(payload: unknown, status = 200): Response {
   return new Response(JSON.stringify(payload), {
@@ -44,15 +78,22 @@ function asObject(value: unknown): JsonObject {
     : {};
 }
 
-// Step 1: investigate the customer's case
+// ======================================================================
+// STEP 1 - INVESTIGATION (evidence assembly)
+// ======================================================================
+
+// Step 1: investigate the customer's case.
+//
+// Evidence assembly for one case. The order is the source of truth: when the
+// requested order exists, the customer context is the order's owner; when it
+// does not exist, no customer is attached (a default/demo customer must never
+// be paired with an unverifiable order to manufacture a match).
+
+
 async function investigate(
-  supabase: ReturnType<typeof createClient>,
+  supabase: SupabaseClient,
   orderId: string,
 ): Promise<Investigation> {
-  // The order is the source of truth. When the requested order exists, the
-  // customer context is the order's owner. When it does not exist, no customer
-  // may be attached to the case: a default/demo customer must never be paired
-  // with an unverifiable order to manufacture a match.
   const orderRes = await supabase
     .from("orders")
     .select("*")
@@ -111,7 +152,114 @@ async function investigate(
   };
 }
 
-// Step 2: build the Qwen reasoning prompt
+// ======================================================================
+// LLM HELPER (Qwen chat completions, reusable)
+// ======================================================================
+
+// Reusable LLM helper for the ResolveAI backend functions.
+//
+// Single place for the Enter AI (Qwen) chat-completions call. The API token is
+// read from the function environment and never leaves the server. Behavior is
+// identical to the previous inline implementation in the support function.
+
+const AI_API_URL = "https://api.enter.pro/code/api/v1/ai/chat/completions";
+const AI_MODEL = "alibaba/qwen-3.7-plus";
+const ENTER_PROJECT_ID = "ff70718998987a15db5307804a6d9c00";
+
+interface LlmResult {
+  status: string;
+  message?: string;
+  response?: unknown;
+}
+
+// Sends one prompt to Qwen and returns the parsed JSON response.
+// Never throws: failures are reported through `status` so callers can escalate.
+async function askQwen(prompt: string): Promise<LlmResult> {
+  const AI_API_TOKEN = Deno.env.get("AI_API_TOKEN_ff7071899898");
+
+  if (!AI_API_TOKEN) {
+    return {
+      status: "not_configured",
+      message: "Qwen API key is not configured yet.",
+    };
+  }
+
+  try {
+    const response = await fetch(AI_API_URL, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${AI_API_TOKEN}`,
+        "Content-Type": "application/json",
+        "X-Session-ID": crypto.randomUUID(),
+        "X-Enter-Project-ID": ENTER_PROJECT_ID,
+      },
+      body: JSON.stringify({
+        model: AI_MODEL,
+        messages: [{ role: "user", content: prompt }],
+        stream: false,
+        temperature: 0.2,
+        max_tokens: 1000,
+      }),
+    });
+
+    if (!response.ok) {
+      const text = await response.text();
+      let errorMessage = "AI service error";
+
+      const dataMatch = text.match(/data: (.+)/);
+      if (dataMatch) {
+        try {
+          errorMessage = JSON.parse(dataMatch[1])?.error?.message ?? errorMessage;
+        } catch {
+          // keep default message
+        }
+      } else {
+        try {
+          const parsed = JSON.parse(text);
+          errorMessage = parsed?.error?.message ?? errorMessage;
+        } catch {
+          // keep default message
+        }
+      }
+
+      return { status: "error", message: errorMessage };
+    }
+
+    const data = await response.json();
+    const content = data?.choices?.[0]?.message?.content;
+
+    if (typeof content !== "string" || content.trim() === "") {
+      return { status: "error", message: "AI returned an empty response." };
+    }
+
+    try {
+      const parsed = JSON.parse(content);
+      return { status: "success", response: parsed };
+    } catch {
+      return {
+        status: "success",
+        response: content,
+        message: "Qwen response was not valid JSON.",
+      };
+    }
+  } catch (error) {
+    return {
+      status: "error",
+      message: error instanceof Error ? error.message : "Unknown AI error",
+    };
+  }
+}
+
+// ======================================================================
+// STEP 2 - REASONING PROMPT
+// ======================================================================
+
+// Step 2: build the Qwen reasoning prompt.
+//
+// The prompt text is unchanged from the original implementation — the multi-agent
+// phases will extend this module, but Phase 0 preserves it exactly.
+
+
 function buildQwenPrompt(message: string, investigation: Investigation): string {
   return `You are ResolveAI, an autonomous customer support reasoning agent.
 
@@ -220,86 +368,19 @@ Return your answer in this exact JSON structure:
 `;
 }
 
-// Step 3: ask Qwen to reason about the case
-async function askQwen(
-  prompt: string,
-): Promise<{ status: string; message?: string; response?: unknown }> {
-  const AI_API_TOKEN = Deno.env.get("AI_API_TOKEN_ff7071899898");
+// ======================================================================
+// STEP 4 - DECISION VALIDATION
+// ======================================================================
 
-  if (!AI_API_TOKEN) {
-    return {
-      status: "not_configured",
-      message: "Qwen API key is not configured yet.",
-    };
-  }
+// Step 4: validate Qwen's decision.
+//
+// Deterministic guard rails around the model output: the decision/action
+// allowlists and cross-field rules are unchanged.
 
-  try {
-    const response = await fetch(AI_API_URL, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${AI_API_TOKEN}`,
-        "Content-Type": "application/json",
-        "X-Session-ID": crypto.randomUUID(),
-        "X-Enter-Project-ID": ENTER_PROJECT_ID,
-      },
-      body: JSON.stringify({
-        model: AI_MODEL,
-        messages: [{ role: "user", content: prompt }],
-        stream: false,
-        temperature: 0.2,
-        max_tokens: 1000,
-      }),
-    });
 
-    if (!response.ok) {
-      const text = await response.text();
-      let errorMessage = "AI service error";
+const ALLOWED_DECISIONS = new Set(["inform", "approve", "deny", "escalate"]);
+const ALLOWED_ACTIONS = new Set(["refund_shipping_fee", "human_review", "no_action"]);
 
-      const dataMatch = text.match(/data: (.+)/);
-      if (dataMatch) {
-        try {
-          errorMessage = JSON.parse(dataMatch[1])?.error?.message ?? errorMessage;
-        } catch {
-          // keep default message
-        }
-      } else {
-        try {
-          const parsed = JSON.parse(text);
-          errorMessage = parsed?.error?.message ?? errorMessage;
-        } catch {
-          // keep default message
-        }
-      }
-
-      return { status: "error", message: errorMessage };
-    }
-
-    const data = await response.json();
-    const content = data?.choices?.[0]?.message?.content;
-
-    if (typeof content !== "string" || content.trim() === "") {
-      return { status: "error", message: "AI returned an empty response." };
-    }
-
-    try {
-      const parsed = JSON.parse(content);
-      return { status: "success", response: parsed };
-    } catch {
-      return {
-        status: "success",
-        response: content,
-        message: "Qwen response was not valid JSON.",
-      };
-    }
-  } catch (error) {
-    return {
-      status: "error",
-      message: error instanceof Error ? error.message : "Unknown AI error",
-    };
-  }
-}
-
-// Step 4: validate Qwen's decision
 function validateQwenDecision(
   qwenResult: unknown,
 ): { valid: boolean; reason: string; decision: string; action: string } {
@@ -370,9 +451,17 @@ function validateQwenDecision(
   };
 }
 
-// Step 5: execute an automatically approved action
+// ======================================================================
+// STEPS 5 & 6 - ACTION EXECUTION + VERIFICATION
+// ======================================================================
+
+// Steps 5 & 6: execute an automatically approved action and verify it happened.
+//
+// Refund and no-action behavior is unchanged.
+
+
 async function executeAction(
-  supabase: ReturnType<typeof createClient>,
+  supabase: SupabaseClient,
   action: string,
   investigation: Investigation,
 ): Promise<JsonObject> {
@@ -417,9 +506,8 @@ async function executeAction(
   return { status: "failed", action, message: "Unsupported action." };
 }
 
-// Step 6: verify that the action actually happened
 async function verifyAction(
-  supabase: ReturnType<typeof createClient>,
+  supabase: SupabaseClient,
   action: string,
   investigation: Investigation,
 ): Promise<JsonObject> {
@@ -453,7 +541,15 @@ async function verifyAction(
   return { verification_status: "failed" };
 }
 
-// Step 7: build the escalation case for human review
+// ======================================================================
+// STEP 7 - ESCALATION CASE
+// ======================================================================
+
+// Step 7: build the escalation case for human review.
+//
+// Escalation payload shape is unchanged.
+
+
 function createEscalationCase(input: {
   customerMessage: string;
   investigation: Investigation;
@@ -479,6 +575,16 @@ function createEscalationCase(input: {
       "This case requires human review. The AI investigation and supporting evidence have been attached for the support agent.",
   };
 }
+
+// ======================================================================
+// STEP 8 - CUSTOMER RESPONSE
+// ======================================================================
+
+// Step 8: build the customer-friendly response.
+//
+// Wording and status values are unchanged, including the neutral escalation
+// message used when an order could not be verified.
+
 
 // Builds a concise human-readable description of the order's current status
 // from the real order fields. Never invents a delay value.
@@ -525,7 +631,6 @@ function buildOrderStatusText(order: JsonObject): string {
   return bits.length > 0 ? bits.join(" · ") : "status currently being updated";
 }
 
-// Step 8: build the customer-friendly response
 function buildCustomerResponse(
   decision: JsonObject,
   investigation: Investigation,
@@ -616,28 +721,18 @@ function buildCustomerResponse(
   };
 }
 
+// ======================================================================
+// CASE PERSISTENCE
+// ======================================================================
+
 // Persist the completed case so support history is kept in the database.
+//
 // Persistence is best-effort: an error here is logged but must never break the
-// support response the customer receives.
-interface SupportCaseRecord {
-  case_id: string;
-  customer_id: string | null;
-  order_id: string;
-  customer_message: string;
-  intent: string;
-  decision: string;
-  reason: string;
-  action: string;
-  evidence: unknown[];
-  action_status: string;
-  verification_status: string;
-  resolution_status: string;
-  escalation_reason: string | null;
-  case_status: string | null;
-}
+// support response the customer receives. Behavior is unchanged.
+
 
 async function persistCaseRecord(
-  supabase: ReturnType<typeof createClient>,
+  supabase: SupabaseClient,
   record: SupportCaseRecord,
 ): Promise<void> {
   try {
@@ -650,6 +745,10 @@ async function persistCaseRecord(
     console.error("Failed to persist support case", error);
   }
 }
+
+// ======================================================================
+// ORCHESTRATOR - support pipeline (Deno.serve)
+// ======================================================================
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
