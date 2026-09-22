@@ -2299,6 +2299,191 @@ function validateAuthorizedAction(input) {
 // <<< ACTION AUTHORITY PURE LOGIC
 
 // ======================================================================
+// EXECUTION TRACE / OBSERVABILITY (Phase 9)
+// ======================================================================
+//
+// A structured record of what ACTUALLY executed for one support case. It is
+// built from real execution only: no simulated progress, no timers, no invented
+// stages. It performs no LLM calls, no database queries, no action execution and
+// stores no prompts or secrets.
+//
+// The trace is kept in memory for this phase and exposed additively in the
+// response; persistent trace storage is deferred (no schema change).
+
+// >>> EXECUTION TRACE PURE LOGIC (plain JS — extracted verbatim by execution-trace.test.mjs)
+const TRACE_VERSION = 1;
+
+const TRACE_STAGES = [
+  "triage",
+  "investigation_planner",
+  "customer_agent",
+  "order_agent",
+  "delivery_agent",
+  "policy_agent",
+  "evidence_engine",
+  "conflict_uncertainty",
+  "reinvestigation",
+  "decision_gate",
+  "decision_agent",
+  "decision_authority",
+  "action_safety",
+  "action_executor",
+  "case_outcome",
+];
+
+const TRACE_STATUSES = ["started", "completed", "failed", "blocked", "skipped"];
+
+// Maps a real domain-result status onto an allowed trace status. A domain that
+// ran but found nothing still executed, so it is `completed` with its real
+// status kept in the summary.
+function traceStatusForDomain(domainStatus) {
+  if (domainStatus === "failed") return "failed";
+
+  return "completed";
+}
+
+// Safe structured summary for a domain stage (never the raw rows).
+function domainStageSummary(result) {
+  const data = result && typeof result === "object" ? result.data : null;
+  const findings =
+    data && typeof data === "object" && Array.isArray(data.findings)
+      ? data.findings.length
+      : 0;
+
+  return {
+    status: typeof result?.status === "string" ? result.status : "unknown",
+    finding_count: findings,
+  };
+}
+
+// Domain agents the plan did not require — recorded as skipped, never invented.
+function missingDomainStages(plan) {
+  const required = Array.isArray(plan) ? plan : [];
+
+  return PLAN_ORDER.filter(function (domain) {
+    return !required.includes(domain);
+  });
+}
+
+function reinvestmentStageStatus(summary) {
+  return summary && summary.performed === true ? "completed" : "skipped";
+}
+
+// Real re-investigation summary: actual rounds only, or the reason it was skipped.
+function reinvestmentStageSummary(summary, rounds) {
+  const safe = summary && typeof summary === "object" ? summary : {};
+  const performed = safe.performed === true;
+
+  if (!performed) {
+    return { rounds: 0, reason: typeof safe.stop_reason === "string" ? safe.stop_reason : "not_required" };
+  }
+
+  const detail = (Array.isArray(rounds) ? rounds : []).map(function (round) {
+    return {
+      round: round && typeof round.round === "number" ? round.round : null,
+      target_domains: Array.isArray(round && round.target_domains)
+        ? round.target_domains.slice()
+        : [],
+      result: round && typeof round.stop_reason === "string" ? round.stop_reason : null,
+    };
+  });
+
+  return { rounds: detail.length, rounds_detail: detail };
+}
+
+function createExecutionTrace(caseId) {
+  return {
+    case_id: typeof caseId === "string" ? caseId : "",
+    trace_version: TRACE_VERSION,
+    started_at: new Date().toISOString(),
+    completed_at: null,
+    stages: [],
+  };
+}
+
+// Opens a stage that is really starting. Returns the entry to complete later.
+function startTraceStage(trace, stage) {
+  if (!trace || typeof trace !== "object" || !Array.isArray(trace.stages)) return null;
+  if (!TRACE_STAGES.includes(stage)) return null;
+
+  const entry = {
+    id: "trace-stage-" + String(trace.stages.length + 1).padStart(3, "0"),
+    stage,
+    status: "started",
+    started_at: new Date().toISOString(),
+    completed_at: null,
+    duration_ms: null,
+    summary: {},
+  };
+
+  trace.stages.push(entry);
+
+  return entry;
+}
+
+// Closes a stage with a real outcome. Duration is measured from the real
+// timestamps and is never negative; if it cannot be measured it stays null.
+function finishTraceStage(entry, status, summary) {
+  if (!entry || typeof entry !== "object") return null;
+  if (!TRACE_STATUSES.includes(status)) return null;
+
+  const completedAt = new Date().toISOString();
+  const startedMs = typeof entry.started_at === "string" ? new Date(entry.started_at).getTime() : NaN;
+  const completedMs = new Date(completedAt).getTime();
+
+  entry.status = status;
+  entry.completed_at = completedAt;
+  entry.duration_ms =
+    Number.isFinite(startedMs) && Number.isFinite(completedMs)
+      ? Math.max(0, completedMs - startedMs)
+      : null;
+  entry.summary = summary && typeof summary === "object" && !Array.isArray(summary) ? summary : {};
+
+  return entry;
+}
+
+function completeTraceStage(entry, summary) {
+  return finishTraceStage(entry, "completed", summary);
+}
+
+function failTraceStage(entry, summary) {
+  return finishTraceStage(entry, "failed", summary);
+}
+
+function blockTraceStage(entry, summary) {
+  return finishTraceStage(entry, "blocked", summary);
+}
+
+// Records a stage that did not run at all (no timings — nothing happened).
+function skipTraceStage(trace, stage, summary) {
+  if (!trace || typeof trace !== "object" || !Array.isArray(trace.stages)) return null;
+  if (!TRACE_STAGES.includes(stage)) return null;
+
+  const entry = {
+    id: "trace-stage-" + String(trace.stages.length + 1).padStart(3, "0"),
+    stage,
+    status: "skipped",
+    started_at: null,
+    completed_at: null,
+    duration_ms: null,
+    summary: summary && typeof summary === "object" && !Array.isArray(summary) ? summary : {},
+  };
+
+  trace.stages.push(entry);
+
+  return entry;
+}
+
+function finishExecutionTrace(trace) {
+  if (!trace || typeof trace !== "object") return null;
+
+  trace.completed_at = new Date().toISOString();
+
+  return trace;
+}
+// <<< EXECUTION TRACE PURE LOGIC
+
+// ======================================================================
 // INVESTIGATION PLANNER + DOMAIN EXECUTOR (Phase 2A)
 // ======================================================================
 //
@@ -2543,6 +2728,7 @@ async function runInvestigationPlan(
   supabase: SupabaseClient,
   triage: { intent?: string; domains?: string[] },
   orderLookup: { order: JsonObject | null; error: string | null },
+  executor?: (domain: string) => Promise<DomainResult>,
 ): Promise<{
   plan: string[];
   results: DomainResult[];
@@ -2550,9 +2736,14 @@ async function runInvestigationPlan(
 }> {
   const plan = planFromTriage(triage);
 
-  const results = await Promise.all(
-    plan.map((domain) => executeDomain(supabase, domain, orderLookup)),
-  );
+  // Optional executor injection point (used for execution tracing); the default
+  // keeps the existing behaviour exactly.
+  const runDomain =
+    typeof executor === "function"
+      ? executor
+      : (domain: string) => executeDomain(supabase, domain, orderLookup);
+
+  const results = await Promise.all(plan.map((domain) => runDomain(domain)));
 
   return { plan, results, investigation: buildInvestigation(results) };
 }
@@ -3109,6 +3300,9 @@ Deno.serve(async (req) => {
     // Generate a unique case ID for every support request
     const caseId = `CASE-${crypto.randomUUID().replace(/-/g, "").slice(0, 8).toUpperCase()}`;
 
+    // Phase 9: execution trace — populated from real execution as the pipeline runs.
+    const trace = createExecutionTrace(caseId);
+
     // Step 0: Triage Agent — classify the complaint and produce the
     // investigation plan. Triage can never block the pipeline: on any failure it
     // falls back to deterministic classification. Its output is small, so the
@@ -3116,6 +3310,8 @@ Deno.serve(async (req) => {
     //
     // The order row is fetched in parallel with triage (every plan needs it), so
     // the database round-trip is hidden behind the model call.
+    const triageEntry = startTraceStage(trace, "triage");
+
     const [triageRun, orderLookup] = await Promise.all([
       runTriage(message),
       resolveOrder(supabase, orderId),
@@ -3124,36 +3320,86 @@ Deno.serve(async (req) => {
     const triage = triageRun.triage;
     const triageSource = triageRun.source;
 
+    completeTraceStage(triageEntry, {
+      intent: triage.intent,
+      urgency: triage.urgency,
+      confidence: triage.confidence,
+      source: triageSource,
+    });
+
     // Step 1: Dynamic Investigation Plan — execute ONLY the domains triage
     // requested. Independent domains run in parallel and a failing domain
     // degrades safely instead of breaking the request.
+    //
+    // Each domain execution is traced individually, so the per-agent timing is
+    // real; the same traced executor is reused by the re-investigation loop.
+    const runTracedDomain = async (domain: string): Promise<DomainResult> => {
+      const entry = startTraceStage(trace, domain + "_agent");
+      const result = await executeDomain(supabase, domain, orderLookup);
+
+      finishTraceStage(
+        entry,
+        traceStatusForDomain(result.status),
+        domainStageSummary(result),
+      );
+
+      return result;
+    };
+
+    const plannerEntry = startTraceStage(trace, "investigation_planner");
+
     const planRun = await runInvestigationPlan(
       supabase,
       triage,
       orderLookup,
+      runTracedDomain,
     );
+
+    completeTraceStage(plannerEntry, { domains: planRun.plan });
+
+    // Domains the plan did not require are recorded as skipped — never invented.
+    for (const skippedDomain of missingDomainStages(planRun.plan)) {
+      skipTraceStage(trace, skippedDomain + "_agent", { reason: "not_in_plan" });
+    }
 
     // Phase 3: Evidence Engine — normalize the specialized agents' structured
     // results into one evidence set, available internally for future phases.
     // Aggregation only: it decides nothing and never touches the legacy
     // investigation object that the reasoning stage consumes.
+    const evidenceEntry = startTraceStage(trace, "evidence_engine");
+
     const evidenceRun = buildEvidence(
       planRun.results.map((result) => result.data),
     );
 
+    completeTraceStage(evidenceEntry, {
+      evidence_count: evidenceRun.evidence.length,
+      agents: Object.keys(evidenceRun.agent_status).length,
+    });
+
     // Phase 4: Conflict & Uncertainty Engine — detection only. It reports whether
     // the evidence is contradictory or insufficient for the required domains; it
     // decides nothing and changes no downstream behaviour.
+    const healthEntry = startTraceStage(trace, "conflict_uncertainty");
+
     const healthRun = analyzeEvidence(
       evidenceRun.evidence,
       evidenceRun.agent_status,
       planRun.plan,
     );
 
+    completeTraceStage(healthEntry, {
+      conflict_status: healthRun.conflict_status,
+      uncertainty_status: healthRun.uncertainty_status,
+      requires_reinvestigation: healthRun.requires_reinvestigation,
+    });
+
     // Phase 5: Re-investigation Loop — bounded and deterministic, and only when
     // the health check asked for it. It re-runs just the responsible domains
     // through the existing domain executor and rebuilds evidence; the reasoning
     // stage below is unchanged.
+    const reinvestigationEntry = startTraceStage(trace, "reinvestigation");
+
     const reinvestigation = await runReinvestmentLoop({
       plan: planRun.plan,
       results: planRun.results,
@@ -3162,10 +3408,14 @@ Deno.serve(async (req) => {
       health: healthRun,
       maxRounds: MAX_REINVESTIGATION_ROUNDS,
       step: (domains: string[]) =>
-        Promise.all(
-          domains.map((domain) => executeDomain(supabase, domain, orderLookup)),
-        ),
+        Promise.all(domains.map((domain) => runTracedDomain(domain))),
     });
+
+    finishTraceStage(
+      reinvestigationEntry,
+      reinvestmentStageStatus(reinvestigation.summary),
+      reinvestmentStageSummary(reinvestigation.summary, reinvestigation.rounds),
+    );
 
     // The legacy investigation object is built from the final results. When no
     // round changed anything it is identical to the initial investigation, and it
@@ -3180,6 +3430,8 @@ Deno.serve(async (req) => {
     // a business decision and does not alter the existing pipeline, so current API
     // behaviour cannot break. Wiring it to final decision control (including
     // skipping reasoning on BLOCK) is the Decision Agent phase.
+    const gateEntry = startTraceStage(trace, "decision_gate");
+
     const decisionGate = evaluateDecisionGate({
       plan: planRun.plan,
       agentResults: reinvestigation.results,
@@ -3187,6 +3439,12 @@ Deno.serve(async (req) => {
       investigationHealth: reinvestigation.health,
       reinvestigation: reinvestigation.summary,
     });
+
+    finishTraceStage(
+      gateEntry,
+      decisionGate.status === "BLOCK" ? "blocked" : "completed",
+      { status: decisionGate.status, reason: decisionGate.reason },
+    );
 
     // Step 2: build the Qwen reasoning prompt (unchanged)
     const qwenPrompt = buildQwenPrompt(message, investigation);
@@ -3196,6 +3454,14 @@ Deno.serve(async (req) => {
     // (so it adds no latency) and is additive in this phase: the existing
     // reasoning/decision/action path still decides and acts. A BLOCKed gate
     // short-circuits before any LLM call.
+    // The Decision Agent is not asked for a decision when the gate blocks it.
+    const decisionAgentEntry =
+      decisionGate.status === "BLOCK"
+        ? skipTraceStage(trace, "decision_agent", {
+            reason: "decision_gate_blocked",
+          })
+        : startTraceStage(trace, "decision_agent");
+
     const [qwenResult, decisionAgent] = await Promise.all([
       askQwen(qwenPrompt),
       runDecisionAgent({
@@ -3207,6 +3473,35 @@ Deno.serve(async (req) => {
         order: orderLookup.order,
       }),
     ]);
+
+    if (decisionAgentEntry && decisionAgentEntry.status === "started") {
+      finishTraceStage(
+        decisionAgentEntry,
+        decisionAgent.status === "completed"
+          ? "completed"
+          : decisionAgent.status === "blocked"
+            ? "blocked"
+            : "failed",
+        {
+          status: decisionAgent.status,
+          decision:
+            typeof decisionAgent.decision === "string"
+              ? decisionAgent.decision
+              : null,
+          action:
+            typeof decisionAgent.action === "string" ? decisionAgent.action : null,
+          confidence:
+            typeof decisionAgent.confidence === "number"
+              ? decisionAgent.confidence
+              : null,
+          evidence_ids: Array.isArray(decisionAgent.evidence_ids)
+            ? decisionAgent.evidence_ids
+            : [],
+          reason:
+            typeof decisionAgent.reason === "string" ? decisionAgent.reason : null,
+        },
+      );
+    }
 
     console.log(
       "triage",
@@ -3273,8 +3568,21 @@ Deno.serve(async (req) => {
     // Every successful response carries the triage result, the executed plan, a
     // minimal evidence summary and the investigation health (additive; existing
     // keys and values are unchanged).
-    const respond = (payload: JsonObject) =>
-      json({
+    const respond = (payload: JsonObject) => {
+      // The case outcome closes the trace — real statuses only, nothing invented.
+      completeTraceStage(startTraceStage(trace, "case_outcome"), {
+        status:
+          typeof payload.resolution_status === "string"
+            ? payload.resolution_status
+            : null,
+        decision:
+          typeof decision.decision === "string" ? decision.decision : null,
+        action: typeof decision.action === "string" ? decision.action : null,
+      });
+
+      finishExecutionTrace(trace);
+
+      return json({
         ...payload,
         triage,
         triage_source: triageSource,
@@ -3344,12 +3652,17 @@ Deno.serve(async (req) => {
           decision: legacyValidation.decision,
           action: legacyValidation.action,
         },
+        // Phase 9: the real execution trace for this case (additive).
+        execution_trace: trace,
       });
+    };
 
     // ---- Phase 8: Decision Authority ------------------------------------
     // The validated Decision Agent is the authoritative source for automated
     // decisions. The legacy reasoning result is kept below as compatibility data
     // only and can never control, override or duplicate an action.
+    const authorityEntry = startTraceStage(trace, "decision_authority");
+
     const authority = resolveAuthoritativeDecision({
       decisionGate,
       decisionAgent,
@@ -3359,8 +3672,22 @@ Deno.serve(async (req) => {
       order: orderLookup.order,
     });
 
+    finishTraceStage(
+      authorityEntry,
+      authority.status === "authorized" ? "completed" : "blocked",
+      {
+        status: authority.status,
+        decision:
+          typeof authority.decision === "string" ? authority.decision : null,
+        action: typeof authority.action === "string" ? authority.action : null,
+        reason: typeof authority.reason === "string" ? authority.reason : null,
+      },
+    );
+
     // Only an authorized decision has an action to safety-check; a blocked
     // authority reports its own reason so the cause stays clear.
+    const safetyEntry = startTraceStage(trace, "action_safety");
+
     const actionSafety =
       authority.status === "authorized"
         ? validateAuthorizedAction({
@@ -3372,6 +3699,16 @@ Deno.serve(async (req) => {
             plan: planRun.plan,
           })
         : { status: "blocked", reason: authority.reason };
+
+    finishTraceStage(
+      safetyEntry,
+      actionSafety.status === "allowed" ? "completed" : "blocked",
+      {
+        status: actionSafety.status,
+        reason:
+          typeof actionSafety.reason === "string" ? actionSafety.reason : null,
+      },
+    );
 
     // The authoritative decision, expressed in the existing legacy vocabulary so
     // the existing response builders, executor and persistence stay unchanged.
@@ -3455,6 +3792,8 @@ Deno.serve(async (req) => {
         case_status: "escalated",
       });
 
+      skipTraceStage(trace, "action_executor", { reason: "escalated" });
+
       return respond({
         case_id: caseId,
         customer_message: message,
@@ -3515,6 +3854,8 @@ Deno.serve(async (req) => {
           case_status: "escalated",
         });
 
+        skipTraceStage(trace, "action_executor", { reason: "escalated" });
+
         return respond({
           case_id: caseId,
           customer_message: message,
@@ -3548,6 +3889,8 @@ Deno.serve(async (req) => {
         case_status: null,
       });
 
+      skipTraceStage(trace, "action_executor", { reason: "no_action_required" });
+
       return respond({
         case_id: caseId,
         customer_message: message,
@@ -3562,6 +3905,8 @@ Deno.serve(async (req) => {
     }
 
     // Step 10: execute an automatically approved action
+    const actionEntry = startTraceStage(trace, "action_executor");
+
     const actionResult = await executeAction(
       supabase,
       decision.action,
@@ -3582,6 +3927,11 @@ Deno.serve(async (req) => {
     } else if (actionResult.status === "failed") {
       actionStatus = "failed";
     }
+
+    completeTraceStage(actionEntry, {
+      status: actionStatus,
+      action: decision.action,
+    });
 
     // Step 13: build customer-friendly response
     const customerResponse = buildCustomerResponse(
