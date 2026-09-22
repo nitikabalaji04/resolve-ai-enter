@@ -501,6 +501,220 @@ async function runTriage(
 }
 
 // ======================================================================
+// CUSTOMER AGENT (Phase 2B)
+// ======================================================================
+//
+// Specialized data-investigation agent for the `customer` domain. One
+// responsibility: retrieve and analyse customer-specific information relevant to
+// the case (profile, support history, previous interactions).
+//
+// Deterministic database calls only — no LLM is used to retrieve customer data.
+// Every finding is derived from actually retrieved rows; nothing is inferred.
+
+// >>> CUSTOMER AGENT PURE LOGIC (plain JS — extracted verbatim by customer-agent.test.mjs)
+const CUSTOMER_AGENT_NAME = "customer_agent";
+
+// Builds findings strictly from retrieved data. Each finding cites its source
+// table and carries full confidence because it is a direct record read.
+function customerFindings(customer, supportHistory) {
+  const findings = [];
+
+  if (customer && typeof customer === "object") {
+    if (typeof customer.name === "string" && customer.name.trim() !== "") {
+      findings.push({
+        finding: "Customer name: " + customer.name,
+        source: "customers",
+        confidence: 1.0,
+      });
+    }
+
+    if (
+      typeof customer.customer_id === "string" &&
+      customer.customer_id.trim() !== ""
+    ) {
+      findings.push({
+        finding: "Customer ID: " + customer.customer_id,
+        source: "customers",
+        confidence: 1.0,
+      });
+    }
+
+    if (
+      typeof customer.membership === "string" &&
+      customer.membership.trim() !== ""
+    ) {
+      findings.push({
+        finding: "Membership tier: " + customer.membership,
+        source: "customers",
+        confidence: 1.0,
+      });
+    }
+
+    if (typeof customer.total_orders === "number") {
+      findings.push({
+        finding: "Recorded total orders: " + customer.total_orders,
+        source: "customers",
+        confidence: 1.0,
+      });
+    }
+
+    const hasEmail =
+      typeof customer.email === "string" && customer.email.trim() !== "";
+    const hasPhone =
+      typeof customer.phone === "string" && customer.phone.trim() !== "";
+
+    if (hasEmail || hasPhone) {
+      findings.push({
+        finding:
+          "Contact details on file: " +
+          [hasEmail ? "email" : null, hasPhone ? "phone" : null]
+            .filter(Boolean)
+            .join(" + "),
+        source: "customers",
+        confidence: 1.0,
+      });
+    }
+  }
+
+  if (Array.isArray(supportHistory) && supportHistory.length > 0) {
+    findings.push({
+      finding: "Support history contains " + supportHistory.length + " ticket(s)",
+      source: "tickets",
+      confidence: 1.0,
+    });
+
+    const openTickets = supportHistory.filter(function (ticket) {
+      return (
+        ticket &&
+        typeof ticket.status === "string" &&
+        ticket.status.toLowerCase() === "open"
+      );
+    }).length;
+
+    if (openTickets > 0) {
+      findings.push({
+        finding: openTickets + " ticket(s) still open",
+        source: "tickets",
+        confidence: 1.0,
+      });
+    }
+
+    // Most recent ticket by recorded date. Computed rather than assumed from
+    // input ordering, so the agent is robust to how rows are returned.
+    const dated = supportHistory.filter(function (ticket) {
+      return (
+        ticket &&
+        typeof ticket.created_date === "string" &&
+        ticket.created_date.trim() !== ""
+      );
+    });
+
+    if (dated.length > 0) {
+      let latest = dated[0];
+
+      for (const ticket of dated) {
+        if (ticket.created_date > latest.created_date) latest = ticket;
+      }
+
+      findings.push({
+        finding: "Most recent ticket dated " + latest.created_date,
+        source: "tickets",
+        confidence: 1.0,
+      });
+    }
+  } else if (Array.isArray(supportHistory)) {
+    findings.push({
+      finding: "No support history recorded for this customer",
+      source: "tickets",
+      confidence: 1.0,
+    });
+  }
+
+  return findings;
+}
+
+// Assembles the Customer Agent's structured result. Deterministic: the status is
+// driven only by the query outcome flags and the retrieved row.
+//   completed -> customer row found
+//   not_found -> no customer row (or no customer to look up)
+//   failed    -> a database/query error
+function customerAgentResult(input) {
+  const src = input || {};
+
+  const failed = Boolean(src.customerError || src.ticketsError);
+
+  const customer =
+    src.customer && typeof src.customer === "object" && !Array.isArray(src.customer)
+      ? src.customer
+      : null;
+
+  const history = Array.isArray(src.supportHistory) ? src.supportHistory : [];
+
+  if (failed) {
+    return {
+      agent: CUSTOMER_AGENT_NAME,
+      domain: "customer",
+      status: "failed",
+      customer: null,
+      support_history: [],
+      findings: [],
+    };
+  }
+
+  if (!customer) {
+    return {
+      agent: CUSTOMER_AGENT_NAME,
+      domain: "customer",
+      status: "not_found",
+      customer: null,
+      support_history: [],
+      findings: [],
+    };
+  }
+
+  return {
+    agent: CUSTOMER_AGENT_NAME,
+    domain: "customer",
+    status: "completed",
+    customer,
+    support_history: history,
+    findings: customerFindings(customer, history),
+  };
+}
+// <<< CUSTOMER AGENT PURE LOGIC
+
+// Customer Agent execution: the deterministic database calls. Never throws — a
+// query failure is reported as `failed` so the rest of the plan still runs.
+async function runCustomerAgent(
+  supabase: SupabaseClient,
+  customerId: string | null,
+): Promise<JsonObject> {
+  if (!customerId) {
+    return customerAgentResult({ customer: null, supportHistory: [] });
+  }
+
+  const [customerRes, ticketsRes] = await Promise.all([
+    supabase
+      .from("customers")
+      .select("*")
+      .eq("customer_id", customerId)
+      .maybeSingle(),
+    supabase
+      .from("tickets")
+      .select("*")
+      .eq("customer_id", customerId)
+      .order("created_date", { ascending: true }),
+  ]);
+
+  return customerAgentResult({
+    customerError: customerRes.error ? customerRes.error.message : null,
+    ticketsError: ticketsRes.error ? ticketsRes.error.message : null,
+    customer: (customerRes.data as JsonObject) ?? null,
+    supportHistory: (ticketsRes.data as JsonObject[]) ?? [],
+  });
+}
+
+// ======================================================================
 // INVESTIGATION PLANNER + DOMAIN EXECUTOR (Phase 2A)
 // ======================================================================
 //
@@ -609,30 +823,33 @@ function buildInvestigation(results) {
       ? orderData
       : null;
 
+  // The customer domain is produced by the Customer Agent (Phase 2B), whose
+  // result carries `customer` + `support_history`. The legacy investigation
+  // object still exposes them as `customer` + `ticket_history`.
   const customerData = completed("customer");
   const customer =
     customerData && customerData.customer && typeof customerData.customer === "object"
       ? customerData.customer
       : null;
   const tickets =
-    customerData && Array.isArray(customerData.tickets)
-      ? customerData.tickets
+    customerData && Array.isArray(customerData.support_history)
+      ? customerData.support_history
       : [];
 
   const policyData = completed("policy");
 
   // customer_id comes from the order owner first (legacy behavior); the customer
-  // domain can supply it when the order domain was not requested.
+  // agent result can supply it when the order domain was not requested.
   let customerId = order && typeof order.customer_id === "string"
     ? order.customer_id
     : null;
 
   if (
     !customerId &&
-    customerData &&
-    typeof customerData.customer_id === "string"
+    customer &&
+    typeof customer.customer_id === "string"
   ) {
-    customerId = customerData.customer_id;
+    customerId = customer.customer_id;
   }
 
   return {
@@ -691,36 +908,16 @@ async function executeDomain(
     }
 
     if (domain === "customer") {
+      // Delegated to the Customer Agent (Phase 2B). It only runs because the
+      // planner selected the `customer` domain.
       const customerId =
         orderRow && typeof orderRow.customer_id === "string"
           ? orderRow.customer_id
           : null;
 
-      if (!customerId) {
-        return domainResult("customer", "not_found", null);
-      }
+      const agentResult = await runCustomerAgent(supabase, customerId);
 
-      const [customerRes, ticketsRes] = await Promise.all([
-        supabase
-          .from("customers")
-          .select("*")
-          .eq("customer_id", customerId)
-          .maybeSingle(),
-        supabase
-          .from("tickets")
-          .select("*")
-          .eq("customer_id", customerId)
-          .order("created_date", { ascending: true }),
-      ]);
-
-      if (customerRes.error) throw new Error(customerRes.error.message);
-      if (ticketsRes.error) throw new Error(ticketsRes.error.message);
-
-      return domainResult("customer", "completed", {
-        customer_id: customerId,
-        customer: (customerRes.data as JsonObject) ?? null,
-        tickets: (ticketsRes.data as JsonObject[]) ?? [],
-      });
+      return domainResult("customer", agentResult.status as string, agentResult);
     }
 
     if (domain === "policy") {
@@ -767,6 +964,22 @@ async function runInvestigationPlan(
   );
 
   return { plan, results, investigation: buildInvestigation(results) };
+}
+
+// Compact, additive view of the executed plan. Includes the agent name when a
+// domain was produced by a specialized agent (e.g. the Customer Agent).
+function planSummary(results: DomainResult[]): JsonObject[] {
+  return results.map((result) => {
+    const data = result.data;
+    const agent =
+      data && typeof data === "object" && !Array.isArray(data) && "agent" in data
+        ? (data as JsonObject).agent
+        : null;
+
+    return agent
+      ? { domain: result.domain, status: result.status, agent }
+      : { domain: result.domain, status: result.status };
+  });
 }
 
 // ======================================================================
@@ -1348,10 +1561,7 @@ Deno.serve(async (req) => {
       JSON.stringify({
         case_id: caseId,
         plan: planRun.plan,
-        results: planRun.results.map((result) => ({
-          domain: result.domain,
-          status: result.status,
-        })),
+        results: planSummary(planRun.results),
       }),
     );
 
@@ -1364,10 +1574,7 @@ Deno.serve(async (req) => {
         triage_source: triageSource,
         investigation_plan: {
           domains: planRun.plan,
-          results: planRun.results.map((result) => ({
-            domain: result.domain,
-            status: result.status,
-          })),
+          results: planSummary(planRun.results),
         },
       });
 

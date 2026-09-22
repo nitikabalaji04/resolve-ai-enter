@@ -103,7 +103,7 @@ const policyRow = { policy_id: 1, policy_type: 'delivery_refund' }
 const full = api.buildInvestigation([
   api.domainResult('order', 'completed', orderRow),
   api.domainResult('delivery', 'completed', api.deliverySnapshot(orderRow)),
-  api.domainResult('customer', 'completed', { customer_id: 'CUST001', customer: customerRow, tickets: tickets }),
+  api.domainResult('customer', 'completed', { agent: 'customer_agent', domain: 'customer', status: 'completed', customer: customerRow, support_history: tickets, findings: [] }),
   api.domainResult('policy', 'completed', policyRow),
 ])
 check('full plan -> legacy shape (order)', full.order && full.order.order_id === '10482')
@@ -116,14 +116,14 @@ check('no extra keys added to investigation', JSON.stringify(Object.keys(full).s
 const withoutPolicy = api.buildInvestigation([
   api.domainResult('order', 'completed', orderRow),
   api.domainResult('delivery', 'completed', api.deliverySnapshot(orderRow)),
-  api.domainResult('customer', 'completed', { customer_id: 'CUST001', customer: customerRow, tickets: tickets }),
+  api.domainResult('customer', 'completed', { agent: 'customer_agent', domain: 'customer', status: 'completed', customer: customerRow, support_history: tickets, findings: [] }),
 ])
 check('ORDER_STATUS plan leaves policy empty', withoutPolicy.policy === null)
 check('ORDER_STATUS plan still has order + customer', withoutPolicy.order.order_id === '10482' && withoutPolicy.customer.name === 'Ananya Sharma')
 
 const deliveryIrrelevant = api.buildInvestigation([
   api.domainResult('order', 'completed', orderRow),
-  api.domainResult('customer', 'completed', { customer_id: 'CUST001', customer: customerRow, tickets: tickets }),
+  api.domainResult('customer', 'completed', { agent: 'customer_agent', domain: 'customer', status: 'completed', customer: customerRow, support_history: tickets, findings: [] }),
   api.domainResult('policy', 'completed', policyRow),
 ])
 check('delivery domain does not change the assembled investigation', JSON.stringify(deliveryIrrelevant) === JSON.stringify(full))
@@ -139,7 +139,7 @@ check('missing order -> no invented customer', missingOrder.customer === null &&
 
 const failedDomain = api.buildInvestigation([
   api.domainResult('order', 'failed', null),
-  api.domainResult('customer', 'completed', { customer_id: 'CUST009', customer: { customer_id: 'CUST009' }, tickets: [] }),
+  api.domainResult('customer', 'completed', { agent: 'customer_agent', domain: 'customer', status: 'completed', customer: { customer_id: 'CUST009' }, support_history: [], findings: [] }),
   api.domainResult('policy', 'failed', null),
 ])
 check('failed domain treated as absent', failedDomain.order === null && failedDomain.policy === null)
