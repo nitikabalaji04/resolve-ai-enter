@@ -2484,6 +2484,162 @@ function finishExecutionTrace(trace) {
 // <<< EXECUTION TRACE PURE LOGIC
 
 // ======================================================================
+// TRACE PERSISTENCE + CASE REPLAY RETRIEVAL (Phase 10)
+// ======================================================================
+//
+// Persists the real Phase 9 execution trace so a completed case can later be
+// inspected (replayed) exactly as it happened.
+//
+// Replay is READ-ONLY: it returns the stored trace unchanged and never re-runs
+// agents, never calls the LLM, never executes actions and never reconstructs a
+// trace from current database state.
+//
+// The client is injected so these helpers stay pure/testable; the support
+// function passes its service-role client (trace writes stay backend-only).
+
+// >>> TRACE PERSISTENCE PURE LOGIC (plain JS — extracted verbatim by case-replay.test.mjs)
+const TRACE_TABLE = "case_investigation_traces";
+
+// Best-effort persistence: an observability write must never fail the support
+// request, retry endlessly, or change the case outcome.
+async function persistExecutionTrace(supabase, trace) {
+  try {
+    if (!supabase || typeof supabase.from !== "function") {
+      return { ok: false, reason: "NO_CLIENT" };
+    }
+
+    if (
+      !trace ||
+      typeof trace !== "object" ||
+      typeof trace.case_id !== "string" ||
+      trace.case_id.trim() === "" ||
+      !Array.isArray(trace.stages)
+    ) {
+      return { ok: false, reason: "INVALID_TRACE" };
+    }
+
+    const { error } = await supabase.from(TRACE_TABLE).insert({
+      case_id: trace.case_id,
+      trace_version:
+        typeof trace.trace_version === "number" ? trace.trace_version : 1,
+      trace,
+    });
+
+    if (error) {
+      // A duplicate means this execution's trace is already stored — idempotent,
+      // never overwritten.
+      if (error.code === "23505") return { ok: true, reason: "ALREADY_STORED" };
+
+      console.error("Failed to persist execution trace", error.message);
+
+      return { ok: false, reason: "INSERT_FAILED" };
+    }
+
+    return { ok: true, reason: "STORED" };
+  } catch (error) {
+    console.error("Failed to persist execution trace", error);
+
+    return { ok: false, reason: "INSERT_FAILED" };
+  }
+}
+
+// Read-only retrieval of a stored trace. Returns the historical trace exactly as
+// recorded; a missing case is a safe not-found, never a reconstruction.
+async function getCaseExecutionTrace(supabase, caseId) {
+  try {
+    if (!supabase || typeof supabase.from !== "function") {
+      return { status: "failed", reason: "NO_CLIENT" };
+    }
+
+    if (typeof caseId !== "string" || caseId.trim() === "") {
+      return { status: "not_found", trace: null };
+    }
+
+    const { data, error } = await supabase
+      .from(TRACE_TABLE)
+      .select("case_id, trace_version, trace, created_at")
+      .eq("case_id", caseId.trim())
+      .maybeSingle();
+
+    if (error) {
+      console.error("Failed to read execution trace", error.message);
+
+      return { status: "failed", reason: "READ_FAILED" };
+    }
+
+    if (!data || typeof data !== "object") {
+      return { status: "not_found", trace: null };
+    }
+
+    return {
+      status: "found",
+      trace: data.trace,
+      trace_version: data.trace_version,
+      stored_at: data.created_at,
+    };
+  } catch (error) {
+    console.error("Failed to read execution trace", error);
+
+    return { status: "failed", reason: "READ_FAILED" };
+  }
+}
+// <<< TRACE PERSISTENCE PURE LOGIC
+
+// Read-only replay endpoint: GET /<caseId>/trace.
+//
+// The service-role client bypasses RLS, so authorization is enforced here, using
+// the same model as the other agent-facing backend functions: a valid session
+// plus an active agent/admin profile. Anonymous callers get 401; authenticated
+// non-agents get 403.
+async function handleTraceRetrieval(
+  req: Request,
+  supabase: SupabaseClient,
+): Promise<Response> {
+  const pathname = new URL(req.url).pathname;
+  const match = pathname.match(/\/([A-Za-z0-9_-]+)\/trace\/?$/);
+
+  if (!match) return json({ error: "Not found." }, 404);
+
+  const caseId = decodeURIComponent(match[1]);
+
+  const authHeader = req.headers.get("Authorization") || "";
+  const jwt = authHeader.replace("Bearer ", "").trim();
+
+  const { data: userData, error: userError } = await supabase.auth.getUser(jwt);
+
+  if (userError || !userData?.user) {
+    return json({ error: "Authentication required." }, 401);
+  }
+
+  const { data: agentProfile, error: profileError } = await supabase
+    .from("agent_profiles")
+    .select("id")
+    .eq("user_id", userData.user.id)
+    .eq("active", true)
+    .in("role", ["agent", "admin"])
+    .maybeSingle();
+
+  if (profileError || !agentProfile) {
+    return json(
+      { error: "Your account is not authorized as a support agent." },
+      403,
+    );
+  }
+
+  const result = await getCaseExecutionTrace(supabase, caseId);
+
+  if (result.status === "not_found") {
+    return json({ error: "No execution trace found for this case." }, 404);
+  }
+
+  if (result.status === "failed") {
+    return json({ error: "Execution trace unavailable." }, 500);
+  }
+
+  return json({ case_id: caseId, execution_trace: result.trace });
+}
+
+// ======================================================================
 // INVESTIGATION PLANNER + DOMAIN EXECUTOR (Phase 2A)
 // ======================================================================
 //
@@ -3275,6 +3431,12 @@ Deno.serve(async (req) => {
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
     );
 
+    // Phase 10: read-only replay of a stored execution trace (agent-only).
+    // POST support requests are completely unaffected.
+    if (req.method === "GET") {
+      return await handleTraceRetrieval(req, supabase);
+    }
+
     const body = (await req.json()) as {
       customer_id?: string;
       order_id?: string;
@@ -3568,7 +3730,7 @@ Deno.serve(async (req) => {
     // Every successful response carries the triage result, the executed plan, a
     // minimal evidence summary and the investigation health (additive; existing
     // keys and values are unchanged).
-    const respond = (payload: JsonObject) => {
+    const respond = async (payload: JsonObject) => {
       // The case outcome closes the trace — real statuses only, nothing invented.
       completeTraceStage(startTraceStage(trace, "case_outcome"), {
         status:
@@ -3581,6 +3743,19 @@ Deno.serve(async (req) => {
       });
 
       finishExecutionTrace(trace);
+
+      // Phase 10: persist the real execution trace. Best-effort only — a failed
+      // write is logged and never changes the outcome, action or decision.
+      const tracePersistence = await persistExecutionTrace(supabase, trace);
+
+      console.log(
+        "execution_trace_persisted",
+        JSON.stringify({
+          case_id: caseId,
+          ok: tracePersistence.ok,
+          reason: tracePersistence.reason,
+        }),
+      );
 
       return json({
         ...payload,

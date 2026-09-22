@@ -1,0 +1,13 @@
+create table public.case_investigation_traces (
+  id bigint generated always as identity primary key,
+  case_id text not null unique references public.support_cases (case_id) on delete cascade,
+  trace_version integer not null default 1,
+  trace jsonb not null,
+  created_at timestamptz not null default now()
+);
+
+alter table public.case_investigation_traces enable row level security;
+
+create policy case_investigation_traces_select_agents
+  on public.case_investigation_traces for select to authenticated
+  using (exists (select 1 from public.agent_profiles ap where ap.user_id = auth.uid() and ap.active = true and ap.role in ('agent','admin')));
