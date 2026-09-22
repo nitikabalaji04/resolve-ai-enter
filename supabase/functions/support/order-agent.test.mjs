@@ -164,7 +164,7 @@ console.log('8. Legacy investigation stays compatible')
 const legacy = api.buildInvestigation([
   api.domainResult('order', 'completed', found),
   api.domainResult('customer', 'completed', { agent: 'customer_agent', domain: 'customer', status: 'completed', customer: { customer_id: 'CUST017', name: 'Riya Saxena' }, support_history: [{ ticket_id: 'T1' }], findings: [] }),
-  api.domainResult('policy', 'completed', { policy_id: 1, policy_type: 'delivery_refund' }),
+  api.domainResult('policy', 'completed', { agent: 'policy_agent', domain: 'policy', status: 'completed', policy: { policy_id: 1, policy_type: 'delivery_refund' }, findings: [] }),
 ])
 check('legacy keys exactly as expected', JSON.stringify(Object.keys(legacy).sort()) === JSON.stringify(['customer', 'customer_id', 'order', 'policy', 'ticket_history']))
 check('order is the raw order row (not the agent wrapper)', legacy.order && legacy.order.order_id === '10510' && !('agent' in legacy.order))

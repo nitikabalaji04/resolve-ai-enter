@@ -959,6 +959,124 @@ async function runCustomerAgent(
 }
 
 // ======================================================================
+// POLICY AGENT (Phase 2E)
+// ======================================================================
+//
+// Specialized retrieval agent for the `policy` domain. It retrieves the
+// applicable support policy and structures the policy data that is already
+// stored in the database.
+//
+// RETRIEVAL ONLY: this agent never decides eligibility. Whether a case satisfies
+// a policy is still evaluated downstream by the existing reasoning/decision
+// stage — the agent only reports what the policy record says.
+//
+// Matching behavior is unchanged: the applicable policy is the first
+// `delivery_refund` policy ordered by policy_id, exactly as before.
+
+// >>> POLICY AGENT PURE LOGIC (plain JS — extracted verbatim by policy-agent.test.mjs)
+const POLICY_AGENT_NAME = "policy_agent";
+
+// The policy type the existing pipeline matches on. Unchanged.
+const APPLICABLE_POLICY_TYPE = "delivery_refund";
+
+// Builds findings strictly from the stored policy record. Conditions are
+// reported verbatim as stored rules — they are never evaluated here.
+function policyFindings(policy) {
+  const findings = [];
+
+  if (!policy || typeof policy !== "object") return findings;
+
+  const push = (finding) => {
+    findings.push({ finding, source: "policies", confidence: 1.0 });
+  };
+
+  const text = (value) => typeof value === "string" && value.trim() !== "";
+
+  if (text(policy.title)) push("Policy: " + policy.title);
+  if (text(policy.policy_type)) push("Policy type: " + policy.policy_type);
+  if (text(policy.action)) push("Policy action: " + policy.action);
+
+  if (typeof policy.policy_id === "number") {
+    push("Policy ID: " + policy.policy_id);
+  }
+
+  if (Array.isArray(policy.conditions)) {
+    const conditions = policy.conditions.filter(function (condition) {
+      return typeof condition === "string" && condition.trim() !== "";
+    });
+
+    if (conditions.length === 0) {
+      push("No eligibility conditions recorded for this policy");
+    }
+
+    for (const condition of conditions) {
+      push("Condition: " + condition);
+    }
+  }
+
+  return findings;
+}
+
+// Assembles the Policy Agent's structured result.
+//   completed -> an applicable policy was retrieved
+//   not_found -> no applicable policy exists
+//   failed    -> the policy query failed
+function policyAgentResult(input) {
+  const src = input || {};
+
+  if (src.policyError) {
+    return {
+      agent: POLICY_AGENT_NAME,
+      domain: "policy",
+      status: "failed",
+      policy: null,
+      findings: [],
+    };
+  }
+
+  const policy =
+    src.policy && typeof src.policy === "object" && !Array.isArray(src.policy)
+      ? src.policy
+      : null;
+
+  if (!policy) {
+    return {
+      agent: POLICY_AGENT_NAME,
+      domain: "policy",
+      status: "not_found",
+      policy: null,
+      findings: [],
+    };
+  }
+
+  return {
+    agent: POLICY_AGENT_NAME,
+    domain: "policy",
+    status: "completed",
+    policy,
+    findings: policyFindings(policy),
+  };
+}
+// <<< POLICY AGENT PURE LOGIC
+
+// Policy Agent execution: the existing applicable-policy query, unchanged. Never
+// throws — a query failure is reported as `failed` so the rest of the plan runs.
+async function runPolicyAgent(supabase: SupabaseClient): Promise<JsonObject> {
+  const policyRes = await supabase
+    .from("policies")
+    .select("*")
+    .eq("policy_type", APPLICABLE_POLICY_TYPE)
+    .order("policy_id", { ascending: true })
+    .limit(1)
+    .maybeSingle();
+
+  return policyAgentResult({
+    policyError: policyRes.error ? policyRes.error.message : null,
+    policy: (policyRes.data as JsonObject) ?? null,
+  });
+}
+
+// ======================================================================
 // INVESTIGATION PLANNER + DOMAIN EXECUTOR (Phase 2A)
 // ======================================================================
 //
@@ -1085,6 +1203,9 @@ function buildInvestigation(results) {
       ? customerData.support_history
       : [];
 
+  // The policy domain is produced by the Policy Agent (Phase 2E), whose result
+  // carries the raw policy record under `policy`. The legacy investigation still
+  // exposes it as the plain `policy` object expected by the reasoning prompt.
   const policyData = completed("policy");
 
   // customer_id comes from the order owner first (legacy behavior); the customer
@@ -1105,7 +1226,10 @@ function buildInvestigation(results) {
     customer,
     order,
     ticket_history: tickets,
-    policy: policyData && typeof policyData === "object" ? policyData : null,
+    policy:
+      policyData && policyData.policy && typeof policyData.policy === "object"
+        ? policyData.policy
+        : null,
     customer_id: customerId,
   };
 }
@@ -1174,19 +1298,12 @@ async function executeDomain(
     }
 
     if (domain === "policy") {
-      const policyRes = await supabase
-        .from("policies")
-        .select("*")
-        .eq("policy_type", "delivery_refund")
-        .order("policy_id", { ascending: true })
-        .limit(1)
-        .maybeSingle();
+      // Delegated to the Policy Agent (Phase 2E). It runs because the planner
+      // selected the `policy` domain and reuses the existing applicable-policy
+      // query (matching behavior unchanged).
+      const agentResult = await runPolicyAgent(supabase);
 
-      if (policyRes.error) throw new Error(policyRes.error.message);
-
-      return policyRes.data
-        ? domainResult("policy", "completed", policyRes.data)
-        : domainResult("policy", "not_found", null);
+      return domainResult("policy", agentResult.status as string, agentResult);
     }
 
     return domainResult(domain, "unsupported", null);

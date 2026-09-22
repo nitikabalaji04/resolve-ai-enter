@@ -104,7 +104,7 @@ const full = api.buildInvestigation([
   api.domainResult('order', 'completed', { agent: 'order_agent', domain: 'order', status: 'completed', order: orderRow, findings: [] }),
   api.domainResult('delivery', 'completed', api.deliverySnapshot(orderRow)),
   api.domainResult('customer', 'completed', { agent: 'customer_agent', domain: 'customer', status: 'completed', customer: customerRow, support_history: tickets, findings: [] }),
-  api.domainResult('policy', 'completed', policyRow),
+  api.domainResult('policy', 'completed', { agent: 'policy_agent', domain: 'policy', status: 'completed', policy: policyRow, findings: [] }),
 ])
 check('full plan -> legacy shape (order)', full.order && full.order.order_id === '10482')
 check('full plan -> legacy shape (customer)', full.customer && full.customer.name === 'Ananya Sharma')
@@ -124,14 +124,14 @@ check('ORDER_STATUS plan still has order + customer', withoutPolicy.order.order_
 const deliveryIrrelevant = api.buildInvestigation([
   api.domainResult('order', 'completed', { agent: 'order_agent', domain: 'order', status: 'completed', order: orderRow, findings: [] }),
   api.domainResult('customer', 'completed', { agent: 'customer_agent', domain: 'customer', status: 'completed', customer: customerRow, support_history: tickets, findings: [] }),
-  api.domainResult('policy', 'completed', policyRow),
+  api.domainResult('policy', 'completed', { agent: 'policy_agent', domain: 'policy', status: 'completed', policy: policyRow, findings: [] }),
 ])
 check('delivery domain does not change the assembled investigation', JSON.stringify(deliveryIrrelevant) === JSON.stringify(full))
 
 const missingOrder = api.buildInvestigation([
   api.domainResult('order', 'not_found', null),
   api.domainResult('customer', 'not_found', null),
-  api.domainResult('policy', 'completed', policyRow),
+  api.domainResult('policy', 'completed', { agent: 'policy_agent', domain: 'policy', status: 'completed', policy: policyRow, findings: [] }),
 ])
 check('missing order -> order null', missingOrder.order === null)
 check('missing order -> customer_id null', missingOrder.customer_id === null)
