@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { supabase } from '../integrations/supabase/client'
 import { RefreshCw, Inbox, AlertTriangle, ChevronLeft } from 'lucide-react'
+import CaseExecutionTrace from './CaseExecutionTrace'
 
 const FILTERS = [
   { value: 'all', label: 'All' },
@@ -824,6 +825,10 @@ export default function CaseManagement({ user }) {
 
                 {showDetails && (
                   <>
+                {/* Observability: the real persisted execution trace for this
+                    case. Read-only — one trace fetch per selected case. */}
+                <CaseExecutionTrace caseId={selectedCase.case_id} />
+
                 {needsSummary && (
                   <div className="case-detail-section full">
                     <span className="case-detail-label">

@@ -7,11 +7,8 @@ import {
   ShieldCheck,
   UserCheck,
   Package,
-  Truck,
-  History,
-  FileCheck,
-  Database,
   Brain,
+  Inbox,
 } from 'lucide-react'
 import {
   fetchSupportCases,
@@ -22,40 +19,8 @@ import {
   customerName,
   capitalize,
 } from '../utils/supportCases'
-
-// The investigation workflow ResolveAI runs for every persisted case.
-const STAGES = [
-  {
-    title: 'Customer Verification',
-    description: 'Customer identity confirmed',
-    icon: UserCheck,
-  },
-  {
-    title: 'Order Lookup',
-    description: 'Order information checked',
-    icon: Package,
-  },
-  {
-    title: 'Delivery Check',
-    description: 'Delivery status checked',
-    icon: Truck,
-  },
-  {
-    title: 'Support History',
-    description: 'Support history reviewed',
-    icon: History,
-  },
-  {
-    title: 'Policy Check',
-    description: 'Shipping refund policy reviewed',
-    icon: FileCheck,
-  },
-  {
-    title: 'Evidence Collected',
-    description: 'Evidence sufficient for decision',
-    icon: Database,
-  },
-]
+import { fetchCaseTrace, normalizeTrace } from '../utils/executionTrace'
+import { TraceStageRow } from './CaseExecutionTrace'
 
 function stageLabel(c) {
   if (c.case_status === 'in_review') return 'Human Review'
@@ -75,16 +40,8 @@ function rowStatus(c) {
   return { label: 'Escalated', className: 'case-status escalated' }
 }
 
-// A persisted case has been investigated end-to-end (a decision was
-// recorded), so the workflow timeline is always complete for real cases.
-function timelineState(selected) {
-  const hasDecision = Boolean(selected && selected.decision)
-
-  return {
-    completedThrough: hasDecision ? STAGES.length - 1 : -1,
-    current: hasDecision ? null : 0,
-  }
-}
+// A persisted case has been investigated end-to-end, so a decision is recorded
+// for it. The real stage-by-stage execution is read from its stored trace below.
 
 export default function InvestigationsData() {
   const [rows, setRows] = useState([])
@@ -92,6 +49,7 @@ export default function InvestigationsData() {
   const [selectedId, setSelectedId] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
+  const [loadedTrace, setLoadedTrace] = useState(null)
 
   useEffect(() => {
     let cancelled = false
@@ -135,7 +93,57 @@ export default function InvestigationsData() {
       ? c.case_id === selectedId
       : firstActive !== null && c.case_id === firstActive.case_id
 
-  const currentState = timelineState(selected)
+  const selectedCaseId = selected?.case_id || null
+
+  // Derived display state: a selection with no loaded trace yet is loading, and
+  // no selection is idle. The effect below never writes state synchronously.
+  const traceState =
+    loadedTrace !== null && loadedTrace.caseId === selectedCaseId
+      ? loadedTrace
+      : {
+          caseId: selectedCaseId,
+          status: selectedCaseId ? 'loading' : 'idle',
+          trace: null,
+          error: null,
+        }
+
+  // The stage list below is the REAL stored execution trace for the selected
+  // case: one selected case -> one trace fetch, no bulk reads. The trace is a
+  // read-only historical record — agents are never re-run to build it.
+  useEffect(() => {
+    if (!selectedCaseId) return undefined
+
+    let cancelled = false
+
+    fetchCaseTrace(selectedCaseId).then((result) => {
+      if (cancelled) return
+
+      if (result.status === 'failed') {
+        setLoadedTrace({
+          caseId: selectedCaseId,
+          status: 'error',
+          trace: null,
+          error: result.error,
+        })
+
+        return
+      }
+
+      const trace =
+        result.status === 'found' ? normalizeTrace(result.trace) : null
+
+      setLoadedTrace({
+        caseId: selectedCaseId,
+        status: trace ? 'ready' : 'empty',
+        trace,
+        error: null,
+      })
+    })
+
+    return () => {
+      cancelled = true
+    }
+  }, [selectedCaseId])
 
   return (
     <div className="dashboard-page investigations-page">
@@ -317,17 +325,21 @@ export default function InvestigationsData() {
         <section className="investigation-panel workflow-panel">
           <div className="panel-header">
             <div>
-              <p className="eyebrow">INVESTIGATION WORKFLOW</p>
+              <p className="eyebrow">EXECUTION TRACE</p>
 
               <h3>
                 {selected ? `Case ${selected.case_id}` : 'No case selected'}
               </h3>
             </div>
 
-            {selected ? (
-              <span className="live-badge">INVESTIGATION COMPLETE</span>
-            ) : (
+            {!selected ? (
               <ShieldCheck size={20} />
+            ) : traceState.status === 'ready' ? (
+              <span className="live-badge">
+                {`${traceState.trace.stages.length} STAGES RECORDED`}
+              </span>
+            ) : (
+              <span className="live-badge">NO RECORDED TRACE</span>
             )}
           </div>
 
@@ -335,63 +347,37 @@ export default function InvestigationsData() {
             <p className="dashboard-note">
               No case selected.
             </p>
+          ) : traceState.status === 'loading' ? (
+            <p className="dashboard-note">
+              Loading execution trace...
+            </p>
+          ) : traceState.status === 'error' ? (
+            <p className="dashboard-note">
+              {`Could not load the execution trace: ${traceState.error}`}
+            </p>
+          ) : traceState.status !== 'ready' || !traceState.trace ? (
+            <div className="trace-empty">
+              <Inbox size={20} />
+
+              <strong>No recorded execution for this case.</strong>
+
+              <p>
+                ResolveAI stores an execution trace when a case is
+                investigated. No trace is stored for this case, so no stages
+                are shown.
+              </p>
+            </div>
           ) : (
-            <div className="timeline">
-              {STAGES.map((stage, index) => {
-                const Icon = stage.icon
+            <div className="trace-timeline">
+              {traceState.trace.stages.map((stage) => (
+                <div key={stage.key} className="trace-timeline-item">
+                  <span
+                    className={`trace-timeline-dot ${stage.statusClass}`}
+                  />
 
-                const isCompleted =
-                  index <= currentState.completedThrough
-
-                const isCurrent = index === currentState.current
-
-                const status = isCompleted
-                  ? 'COMPLETED'
-                  : isCurrent
-                    ? 'IN PROGRESS'
-                    : 'PENDING'
-
-                return (
-                  <div
-                    key={stage.title}
-                    className={`timeline-item ${
-                      isCompleted
-                        ? 'timeline-complete'
-                        : isCurrent
-                          ? 'timeline-current'
-                          : 'timeline-pending'
-                    }`}
-                  >
-                    <div className="timeline-icon">
-                      {isCompleted ? (
-                        <Check size={14} />
-                      ) : isCurrent ? (
-                        <span className="timeline-loader">
-                          ...
-                        </span>
-                      ) : (
-                        <Icon size={14} />
-                      )}
-                    </div>
-
-                    <div className="timeline-content">
-                      <div className="timeline-title-row">
-                        <strong>
-                          {stage.title}
-                        </strong>
-
-                        <span className="timeline-status">
-                          {status}
-                        </span>
-                      </div>
-
-                      <p>
-                        {stage.description}
-                      </p>
-                    </div>
-                  </div>
-                )
-              })}
+                  <TraceStageRow stage={stage} />
+                </div>
+              ))}
             </div>
           )}
         </section>
