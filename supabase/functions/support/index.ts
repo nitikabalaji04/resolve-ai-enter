@@ -265,6 +265,36 @@ const INTENT_DOMAINS = {
   UNKNOWN: ["customer", "order"],
 };
 
+// Deterministic triage-intent -> policy-type mapping (Phase 12A).
+//
+// Only policy types that actually exist in the `policies` table are used, so the
+// Policy Agent can retrieve the policy relevant to the validated intent. An
+// intent with no matching policy resolves to null: the planner then does not
+// require policy evidence, the Policy Agent returns not_found, and the case
+// escalates safely. No policy type is ever invented.
+const POLICY_TYPE_BY_INTENT = {
+  DELIVERY_DELAY: "delivery_refund",
+  REFUND_REQUEST: "delivery_refund",
+  WRONG_PRODUCT: "wrong_product",
+  DAMAGED_PRODUCT: "product_refund",
+  DUPLICATE_PAYMENT: "duplicate_payment",
+  ORDER_STATUS: null,
+  UNKNOWN: null,
+};
+
+// The policy type applicable to a validated intent (null when none applies).
+function policyTypeForIntent(intent) {
+  if (typeof intent !== "string") return null;
+
+  const type = POLICY_TYPE_BY_INTENT[intent.trim().toUpperCase()];
+
+  return typeof type === "string" && type !== "" ? type : null;
+}
+
+function intentRequiresPolicy(intent) {
+  return policyTypeForIntent(intent) !== null;
+}
+
 // Ordered keyword rules used by the deterministic fallback classifier. Order
 // matters: more specific intents are matched before generic ones.
 const INTENT_KEYWORDS = [
@@ -976,7 +1006,8 @@ async function runCustomerAgent(
 // >>> POLICY AGENT PURE LOGIC (plain JS — extracted verbatim by policy-agent.test.mjs)
 const POLICY_AGENT_NAME = "policy_agent";
 
-// The policy type the existing pipeline matches on. Unchanged.
+// Default policy type, used when no intent context is supplied (the legacy
+// compatibility path). Unchanged behaviour.
 const APPLICABLE_POLICY_TYPE = "delivery_refund";
 
 // Builds findings strictly from the stored policy record. Conditions are
@@ -1061,11 +1092,27 @@ function policyAgentResult(input) {
 
 // Policy Agent execution: the existing applicable-policy query, unchanged. Never
 // throws — a query failure is reported as `failed` so the rest of the plan runs.
-async function runPolicyAgent(supabase: SupabaseClient): Promise<JsonObject> {
+async function runPolicyAgent(
+  supabase: SupabaseClient,
+  policyType?: string | null,
+): Promise<JsonObject> {
+  // The caller supplies the policy type derived from the validated intent; an
+  // explicit empty value means "no applicable policy" and returns not_found.
+  const resolvedType =
+    policyType === undefined
+      ? APPLICABLE_POLICY_TYPE
+      : typeof policyType === "string" && policyType.trim() !== ""
+        ? policyType.trim()
+        : null;
+
+  if (resolvedType === null) {
+    return policyAgentResult({ policy: null });
+  }
+
   const policyRes = await supabase
     .from("policies")
     .select("*")
-    .eq("policy_type", APPLICABLE_POLICY_TYPE)
+    .eq("policy_type", resolvedType)
     .order("policy_id", { ascending: true })
     .limit(1)
     .maybeSingle();
@@ -2038,6 +2085,7 @@ function buildDecisionAgentPrompt(input) {
   const gate = src.gate && typeof src.gate === "object" ? src.gate : {};
   const plan = Array.isArray(src.plan) ? src.plan : [];
   const message = typeof src.message === "string" ? src.message : "";
+  const policyType = typeof src.policyType === "string" ? src.policyType : "";
 
   const byDomain = {};
 
@@ -2073,6 +2121,7 @@ ${section("POLICY EVIDENCE", "policy")}
 
 INVESTIGATION HEALTH: conflict=${health.conflict_status || "none"} uncertainty=${health.uncertainty_status || "none"}
 DECISION GATE: ${gate.status || "unknown"}
+RETRIEVED POLICY TYPE: ${policyType || "none"}
 
 RULES:
 - Decide ONLY from the evidence listed above. Never invent facts.
@@ -2081,6 +2130,7 @@ RULES:
 - "action" MUST be exactly one of: REFUND_SHIPPING_FEE, NO_ACTION, ESCALATE_TO_HUMAN
 - Allowed pairings: APPROVE -> REFUND_SHIPPING_FEE; DENY -> NO_ACTION; INFORM -> NO_ACTION; ESCALATE -> ESCALATE_TO_HUMAN
 - A refund requires policy evidence that supports it.
+- Only REFUND_SHIPPING_FEE can be executed automatically, and only when the retrieved policy type is delivery_refund. If the applicable policy would require any other action (replacement, product refund, cancellation, payment reversal), use ESCALATE.
 - Never propose a refund for an order that is already refunded.
 - If the evidence is insufficient to decide safely, use ESCALATE.
 - You only propose; you never perform actions yourself.
@@ -2107,6 +2157,7 @@ async function runDecisionAgent(input: {
   evidence: JsonObject[];
   health: JsonObject;
   order: JsonObject | null;
+  policyType?: string | null;
 }): Promise<JsonObject> {
   const blocked = blockedDecisionAgentResult(input.gate);
 
@@ -2254,6 +2305,8 @@ function validateAuthorizedAction(input) {
       : investigation && investigation.order && typeof investigation.order === "object"
         ? investigation.order
         : null;
+  const policyType =
+    typeof src.policyType === "string" ? src.policyType.trim() : "";
 
   const blocked = (reason) => ({ status: "blocked", reason });
 
@@ -2272,6 +2325,14 @@ function validateAuthorizedAction(input) {
   }
 
   if (action === "REFUND_SHIPPING_FEE") {
+    // Phase 12A: the only executable refund is the shipping-fee refund, which
+    // only the delivery_refund policy supports. A policy that would require any
+    // other action (replacement, product refund, cancellation, payment reversal)
+    // must escalate instead — the executor cannot safely perform those.
+    if (policyType !== "" && policyType !== "delivery_refund") {
+      return blocked("UNSUPPORTED_ACTION_FOR_POLICY");
+    }
+
     if (!order) return blocked("ORDER_MISSING");
 
     // Never authorise a second refund for an order that was already refunded.
@@ -2691,6 +2752,13 @@ function planFromTriage(triage) {
 
   if (triage && Array.isArray(triage.domains)) triage.domains.forEach(add);
 
+  // Phase 12A: policy investigation is included whenever the validated intent
+  // requires policy evidence. Derived from the intent->policy mapping rather
+  // than hardcoded per intent, and only ever added (never removed).
+  if (intentRequiresPolicy(intent) && !wanted.includes("policy")) {
+    wanted.push("policy");
+  }
+
   if (wanted.length === 0) return DEFAULT_PLAN.slice();
 
   return PLAN_ORDER.filter((domain) => wanted.includes(domain));
@@ -2826,6 +2894,7 @@ async function executeDomain(
   supabase: SupabaseClient,
   domain: string,
   orderLookup: { order: JsonObject | null; error: string | null },
+  policyType?: string | null,
 ): Promise<DomainResult> {
   const orderRow = orderLookup.order;
 
@@ -2861,10 +2930,10 @@ async function executeDomain(
     }
 
     if (domain === "policy") {
-      // Delegated to the Policy Agent (Phase 2E). It runs because the planner
-      // selected the `policy` domain and reuses the existing applicable-policy
-      // query (matching behavior unchanged).
-      const agentResult = await runPolicyAgent(supabase);
+      // Delegated to the Policy Agent. It runs because the planner selected the
+      // `policy` domain, and retrieves the policy type derived from the
+      // validated intent (Phase 12A); matching order is unchanged.
+      const agentResult = await runPolicyAgent(supabase, policyType);
 
       return domainResult("policy", agentResult.status as string, agentResult);
     }
@@ -3489,6 +3558,10 @@ Deno.serve(async (req) => {
       source: triageSource,
     });
 
+    // Phase 12A: the validated intent determines which policy type applies, so
+    // the Policy Agent retrieves the policy relevant to this case.
+    const policyType = policyTypeForIntent(triage.intent);
+
     // Step 1: Dynamic Investigation Plan — execute ONLY the domains triage
     // requested. Independent domains run in parallel and a failing domain
     // degrades safely instead of breaking the request.
@@ -3497,7 +3570,7 @@ Deno.serve(async (req) => {
     // real; the same traced executor is reused by the re-investigation loop.
     const runTracedDomain = async (domain: string): Promise<DomainResult> => {
       const entry = startTraceStage(trace, domain + "_agent");
-      const result = await executeDomain(supabase, domain, orderLookup);
+      const result = await executeDomain(supabase, domain, orderLookup, policyType);
 
       finishTraceStage(
         entry,
@@ -3633,6 +3706,7 @@ Deno.serve(async (req) => {
         evidence: reinvestigation.evidence,
         health: reinvestigation.health,
         order: orderLookup.order,
+        policyType,
       }),
     ]);
 
@@ -3872,6 +3946,7 @@ Deno.serve(async (req) => {
             investigation,
             evidence: reinvestigation.evidence,
             plan: planRun.plan,
+            policyType,
           })
         : { status: "blocked", reason: authority.reason };
 
