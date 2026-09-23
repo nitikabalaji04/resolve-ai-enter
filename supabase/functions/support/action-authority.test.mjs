@@ -175,7 +175,11 @@ console.log('')
 console.log('12. Already-refunded order cannot execute a legacy refund')
 check('only one executeAction call site', (source.match(/await executeAction\(/g) || []).length === 1)
 check('executor uses the authoritative action', /await executeAction\([\s\S]{0,80}decision\.action/.test(source))
-check('exactly one refund write implementation', (source.match(/refund_status: "initiated"/g) || []).length <= 2)
+const executorBlock = source.slice(source.indexOf('// >>> ACTION EXECUTOR'), source.indexOf('// <<< ACTION EXECUTOR'))
+const refundWrites = (source.match(/\.update\(\{ refund_status: "initiated" \}\)/g) || []).length
+const executorWrites = (executorBlock.match(/\.update\(\{ refund_status: "initiated" \}\)/g) || []).length
+check('every refund write lives in the executor', refundWrites === executorWrites && refundWrites > 0)
+check('one write per supported refund action', refundWrites === 2)
 check('the refund executor is unchanged', /async function executeAction\(/.test(source) && /async function verifyAction\(/.test(source))
 
 console.log('')

@@ -180,7 +180,7 @@ check('existing policy output contract preserved', (function () {
   return JSON.stringify(Object.keys(r).sort()) === JSON.stringify(['agent', 'domain', 'findings', 'policy', 'status'])
 })())
 check('policy findings shape preserved', api.policyFindings(POLICY_ROWS.delivery_refund).every(function (f) { return typeof f.finding === 'string' && f.source === 'policies' && f.confidence === 1.0 }))
-check('prompt states the executable-action scope', /Only REFUND_SHIPPING_FEE can be executed automatically/.test(api.buildDecisionAgentPrompt({ message: 'x', evidence: POLICY_EVIDENCE, health: {}, gate: { status: 'PROCEED' }, plan: PLAN, policyType: 'wrong_product' })))
+check('prompt states the executable-action scope', /Executable actions: REFUND_SHIPPING_FEE/.test(api.buildDecisionAgentPrompt({ message: 'x', evidence: POLICY_EVIDENCE, health: {}, gate: { status: 'PROCEED' }, plan: PLAN, policyType: 'wrong_product' })))
 check('prompt reports the retrieved policy type', api.buildDecisionAgentPrompt({ message: 'x', evidence: POLICY_EVIDENCE, health: {}, gate: { status: 'PROCEED' }, plan: PLAN, policyType: 'wrong_product' }).includes('RETRIEVED POLICY TYPE: wrong_product'))
 
 console.log('')

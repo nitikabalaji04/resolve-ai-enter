@@ -1904,16 +1904,26 @@ const DECISION_AGENT_NAME = "decision_agent";
 const DECISION_AGENT_DECISIONS = ["APPROVE", "DENY", "INFORM", "ESCALATE"];
 const DECISION_AGENT_ACTIONS = [
   "REFUND_SHIPPING_FEE",
+  "PRODUCT_REFUND",
   "NO_ACTION",
   "ESCALATE_TO_HUMAN",
 ];
 
 // The only decision/action pairings the existing system supports.
 const DECISION_ACTION_MAP = {
-  APPROVE: ["REFUND_SHIPPING_FEE"],
+  APPROVE: ["REFUND_SHIPPING_FEE", "PRODUCT_REFUND"],
   DENY: ["NO_ACTION"],
   INFORM: ["NO_ACTION"],
   ESCALATE: ["ESCALATE_TO_HUMAN"],
+};
+
+// Phase 12B: which policy types may support each executable action. A policy
+// that would require any other action must escalate instead — replacement and
+// payment reversal remain unimplemented because the schema cannot represent
+// their business state safely.
+const ACTION_POLICY_SCOPE = {
+  REFUND_SHIPPING_FEE: ["delivery_refund"],
+  PRODUCT_REFUND: ["product_refund", "wrong_product"],
 };
 
 // Decisions that act on the customer's request without a human, so they must
@@ -2044,8 +2054,9 @@ function validateDecisionAgentOutput(input) {
     return fail("ACTION_ALREADY_COMPLETED");
   }
 
-  // Safety: a refund must be supported by policy evidence when policy is planned.
-  if (action === "REFUND_SHIPPING_FEE") {
+  // Safety: any action that depends on a policy (shipping-fee refund, product
+  // refund) must be supported by cited policy evidence when policy is planned.
+  if ((ACTION_POLICY_SCOPE[action] || []).length > 0) {
     const planRequiresPolicy = plan.some(function (domain) {
       return typeof domain === "string" && domain.trim().toLowerCase() === "policy";
     });
@@ -2127,10 +2138,11 @@ RULES:
 - Decide ONLY from the evidence listed above. Never invent facts.
 - Never invent evidence ids. Only cite ids that appear above.
 - "decision" MUST be exactly one of: APPROVE, DENY, INFORM, ESCALATE
-- "action" MUST be exactly one of: REFUND_SHIPPING_FEE, NO_ACTION, ESCALATE_TO_HUMAN
-- Allowed pairings: APPROVE -> REFUND_SHIPPING_FEE; DENY -> NO_ACTION; INFORM -> NO_ACTION; ESCALATE -> ESCALATE_TO_HUMAN
+- "action" MUST be exactly one of: REFUND_SHIPPING_FEE, PRODUCT_REFUND, NO_ACTION, ESCALATE_TO_HUMAN
+- Allowed pairings: APPROVE -> REFUND_SHIPPING_FEE or PRODUCT_REFUND; DENY -> NO_ACTION; INFORM -> NO_ACTION; ESCALATE -> ESCALATE_TO_HUMAN
 - A refund requires policy evidence that supports it.
-- Only REFUND_SHIPPING_FEE can be executed automatically, and only when the retrieved policy type is delivery_refund. If the applicable policy would require any other action (replacement, product refund, cancellation, payment reversal), use ESCALATE.
+- Executable actions: REFUND_SHIPPING_FEE requires the retrieved policy type delivery_refund; PRODUCT_REFUND requires the retrieved policy type product_refund or wrong_product.
+- Replacement, payment reversal, cancellation and any other resolution CANNOT be executed automatically: use ESCALATE for those.
 - Never propose a refund for an order that is already refunded.
 - If the evidence is insufficient to decide safely, use ESCALATE.
 - You only propose; you never perform actions yourself.
@@ -2223,6 +2235,7 @@ const LEGACY_DECISION_BY_AUTHORITY = {
 
 const LEGACY_ACTION_BY_AUTHORITY = {
   REFUND_SHIPPING_FEE: "refund_shipping_fee",
+  PRODUCT_REFUND: "product_refund",
   NO_ACTION: "no_action",
   ESCALATE_TO_HUMAN: "human_review",
 };
@@ -2324,12 +2337,13 @@ function validateAuthorizedAction(input) {
     return blocked("INVALID_DECISION_ACTION_PAIRING");
   }
 
-  if (action === "REFUND_SHIPPING_FEE") {
-    // Phase 12A: the only executable refund is the shipping-fee refund, which
-    // only the delivery_refund policy supports. A policy that would require any
-    // other action (replacement, product refund, cancellation, payment reversal)
-    // must escalate instead — the executor cannot safely perform those.
-    if (policyType !== "" && policyType !== "delivery_refund") {
+  // Both refund-like actions share the same deterministic safety rules: they
+  // must be supported by the applicable policy, have an order that is not
+  // already refunded, and be backed by order and policy evidence.
+  if (action === "REFUND_SHIPPING_FEE" || action === "PRODUCT_REFUND") {
+    const policyScope = ACTION_POLICY_SCOPE[action] || [];
+
+    if (policyType !== "" && !policyScope.includes(policyType)) {
       return blocked("UNSUPPORTED_ACTION_FOR_POLICY");
     }
 
@@ -3197,6 +3211,8 @@ function validateQwenDecision(
 // Steps 5 & 6: execute an automatically approved action and verify it happened.
 //
 // Refund and no-action behavior is unchanged.
+//
+// >>> ACTION EXECUTOR (extracted by enterprise-actions.test.mjs)
 
 
 async function executeAction(
@@ -3227,6 +3243,33 @@ async function executeAction(
       order_id: order.order_id,
       refund_status: "initiated",
       message: "Shipping fee refund has been initiated.",
+    };
+  }
+
+  // Phase 12B: product refund (damaged / wrong product). Uses the same order
+  // refund state as the shipping-fee refund, so a completed refund of either
+  // kind blocks any further refund on the same order (idempotent).
+  if (action === "product_refund") {
+    if (!order) {
+      return { status: "failed", action, message: "Order information is missing." };
+    }
+
+    const { error } = await supabase
+      .from("orders")
+      .update({ refund_status: "initiated" })
+      .eq("order_id", order.order_id);
+
+    if (error) {
+      console.error("execute product_refund error", error);
+      return { status: "failed", action, message: error.message };
+    }
+
+    return {
+      status: "completed",
+      action,
+      order_id: order.order_id,
+      refund_status: "initiated",
+      message: "Product refund has been initiated.",
     };
   }
 
@@ -3273,12 +3316,37 @@ async function verifyAction(
       : { verification_status: "failed" };
   }
 
+  // Phase 12B: verification for the product refund mirrors the shipping-fee
+  // refund — re-read the order's refund state after the write.
+  if (action === "product_refund") {
+    if (!order) {
+      return { verification_status: "failed" };
+    }
+
+    const { data, error } = await supabase
+      .from("orders")
+      .select("refund_status")
+      .eq("order_id", order.order_id)
+      .maybeSingle();
+
+    if (error || !data) {
+      console.error("verify product_refund error", error);
+      return { verification_status: "failed" };
+    }
+
+    return data.refund_status === "initiated"
+      ? { verification_status: "verified" }
+      : { verification_status: "failed" };
+  }
+
   if (action === "human_review" || action === "no_action") {
     return { verification_status: "not_required" };
   }
 
   return { verification_status: "failed" };
 }
+
+// <<< ACTION EXECUTOR
 
 // ======================================================================
 // STEP 7 - ESCALATION CASE
@@ -3393,6 +3461,15 @@ function buildCustomerResponse(
         message: `Hi ${customerName}, your shipping fee refund for order #${orderId} has been initiated successfully.`,
         details:
           "Your order qualified for the refund because it used Express delivery and was delayed by 2 or more days.",
+      };
+    }
+
+    if (action === "product_refund") {
+      return {
+        status: "resolved",
+        message: `Hi ${customerName}, your product refund for order #${orderId} has been initiated successfully.`,
+        details:
+          "Your order qualified for a product refund under the applicable policy.",
       };
     }
 

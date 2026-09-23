@@ -233,7 +233,7 @@ console.log('')
 console.log('20. Unsupported action rejected')
 check('replacement action rejected', validate(approveOutput({ action: 'REPLACE_PRODUCT' })).reason === 'INVALID_ACTION')
 check('lowercase is normalised, not rejected', validate(approveOutput({ decision: 'approve', action: 'refund_shipping_fee' })).valid === true)
-check('allowed vocabularies are exactly as documented', api.DECISION_AGENT_DECISIONS.join(',') === 'APPROVE,DENY,INFORM,ESCALATE' && api.DECISION_AGENT_ACTIONS.join(',') === 'REFUND_SHIPPING_FEE,NO_ACTION,ESCALATE_TO_HUMAN')
+check('allowed vocabularies are exactly as documented', api.DECISION_AGENT_DECISIONS.join(',') === 'APPROVE,DENY,INFORM,ESCALATE' && api.DECISION_AGENT_ACTIONS.join(',') === 'REFUND_SHIPPING_FEE,PRODUCT_REFUND,NO_ACTION,ESCALATE_TO_HUMAN')
 
 console.log('')
 console.log('21. Deterministic validation')
