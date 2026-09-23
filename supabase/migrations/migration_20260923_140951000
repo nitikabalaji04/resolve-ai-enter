@@ -1,0 +1,9 @@
+update public.customers c
+set total_orders = o.cnt
+from (
+  select customer_id, count(*)::int as cnt
+  from public.orders
+  where customer_id like 'ENT-C%'
+  group by customer_id
+) o
+where c.customer_id = o.customer_id;
