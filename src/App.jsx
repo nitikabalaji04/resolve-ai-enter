@@ -5,6 +5,7 @@ import AgentLogin from './components/AgentLogin'
 import DashboardData from './components/DashboardData'
 import InvestigationsData from './components/InvestigationsData'
 import HumanReviewQueue from './components/HumanReviewQueue'
+import CaseDetails from './components/CaseDetails'
 import {
   LayoutDashboard,
   MessageCircle,
@@ -17,6 +18,8 @@ import {
   ShieldCheck,
   FolderOpen,
   LogOut,
+  AlertTriangle,
+  RefreshCw,
 } from 'lucide-react'
 
 // Deterministically extracts an explicitly mentioned order number from a
@@ -45,6 +48,7 @@ function App() {
   const [sessionLoading, setSessionLoading] = useState(true)
   const [isAgent, setIsAgent] = useState(false)
   const [agentCheckDone, setAgentCheckDone] = useState(false)
+  const [caseDetails, setCaseDetails] = useState(null)
 
   useEffect(() => {
     // Register the listener BEFORE checking for an existing session.
@@ -111,6 +115,49 @@ function App() {
       cancelled = true
     }
   }, [session?.user?.id])
+
+  // ---- Dedicated Case Details page -------------------------------------
+  // Case Management keeps its own list -> details flow. The Investigations
+  // console asks App to open the SAME Case Details component here, so it is a
+  // full page instead of something embedded inside Investigations. Nothing is
+  // duplicated: this is the existing view, owned by the app shell.
+  const navigateTo = (page) => {
+    setCaseDetails(null)
+    setActivePage(page)
+  }
+
+  const openCaseDetails = async (caseId) => {
+    if (!caseId) return
+
+    setCaseDetails({ status: 'loading', caseId, caseRecord: null, error: null })
+
+    try {
+      const { data, error } = await supabase
+        .from('support_cases')
+        .select('*')
+        .eq('case_id', caseId)
+        .maybeSingle()
+
+      if (error) throw error
+      if (!data) throw new Error('Case not found.')
+
+      setCaseDetails({
+        status: 'ready',
+        caseId,
+        caseRecord: data,
+        error: null,
+      })
+    } catch (err) {
+      setCaseDetails({
+        status: 'error',
+        caseId,
+        caseRecord: null,
+        error: err?.message || 'Could not open the case details.',
+      })
+    }
+  }
+
+  const closeCaseDetails = () => setCaseDetails(null)
 
   // Safely convert backend values into text
   const safeText = (value, fallback = '') => {
@@ -278,7 +325,7 @@ function App() {
   }
 
   const handleStartSupport = () => {
-    setActivePage('Customer Support')
+    navigateTo('Customer Support')
   }
 
   const getStepClass = (stepNumber) => {
@@ -323,7 +370,7 @@ function App() {
         </button>
       </div>
 
-      <DashboardData onViewAll={() => setActivePage('Case Management')} />
+      <DashboardData onViewAll={() => navigateTo('Case Management')} />
     </div>
   )
 
@@ -794,7 +841,9 @@ function App() {
     )
   }
 
-  const renderInvestigations = () => <InvestigationsData />
+  const renderInvestigations = () => (
+    <InvestigationsData onOpenCaseDetails={openCaseDetails} />
+  )
 
   const renderAgentDashboard = () => <HumanReviewQueue />
 
@@ -842,7 +891,54 @@ function App() {
     return renderFn()
   }
 
+  const renderCaseDetailsPage = () => {
+    if (caseDetails.status === 'loading') {
+      return (
+        <div className="dashboard-page case-management-page">
+          <div className="case-state-box">
+            <RefreshCw size={20} className="case-spin" />
+
+            <p>Opening case details...</p>
+          </div>
+        </div>
+      )
+    }
+
+    if (caseDetails.status === 'error') {
+      return (
+        <div className="dashboard-page case-management-page">
+          <div className="case-error-banner">
+            <AlertTriangle size={16} />
+
+            <div>
+              <strong>Could not open case details</strong>
+
+              <p>{caseDetails.error}</p>
+            </div>
+
+            <button type="button" onClick={closeCaseDetails}>
+              Back to Investigations
+            </button>
+          </div>
+        </div>
+      )
+    }
+
+    return (
+      <CaseDetails
+        key={caseDetails.caseRecord.case_id}
+        caseRecord={caseDetails.caseRecord}
+        user={session?.user ?? null}
+        onBack={closeCaseDetails}
+      />
+    )
+  }
+
   const renderPage = () => {
+    if (caseDetails) {
+      return renderCaseDetailsPage()
+    }
+
     switch (activePage) {
       case 'Customer Support':
         return renderCustomerSupport()
@@ -886,7 +982,7 @@ function App() {
                 ? 'active'
                 : ''
             }`}
-            onClick={() => setActivePage('Dashboard')}
+            onClick={() => navigateTo('Dashboard')}
           >
             <LayoutDashboard size={18} />
 
@@ -901,7 +997,7 @@ function App() {
                 ? 'active'
                 : ''
             }`}
-            onClick={() => setActivePage('Customer Support')}
+            onClick={() => navigateTo('Customer Support')}
           >
             <MessageCircle size={18} />
 
@@ -916,7 +1012,7 @@ function App() {
                 ? 'active'
                 : ''
             }`}
-            onClick={() => setActivePage('Investigations')}
+            onClick={() => navigateTo('Investigations')}
           >
             <SearchCheck size={18} />
 
@@ -931,7 +1027,7 @@ function App() {
                 ? 'active'
                 : ''
             }`}
-            onClick={() => setActivePage('Agent Dashboard')}
+            onClick={() => navigateTo('Agent Dashboard')}
           >
             <UsersRound size={18} />
 
@@ -946,7 +1042,7 @@ function App() {
                 ? 'active'
                 : ''
             }`}
-            onClick={() => setActivePage('Case Management')}
+            onClick={() => navigateTo('Case Management')}
           >
             <FolderOpen size={18} />
 
@@ -1007,7 +1103,7 @@ function App() {
             </span>
 
             <span>
-              {activePage}
+              {caseDetails ? 'Case Details' : activePage}
             </span>
           </div>
 

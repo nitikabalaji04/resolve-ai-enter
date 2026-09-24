@@ -17,7 +17,6 @@ import {
   ScanSearch,
   SearchCheck,
 } from 'lucide-react'
-import { supabase } from '../integrations/supabase/client'
 import {
   fetchSupportCases,
   fetchCustomerMap,
@@ -32,7 +31,6 @@ import {
   healthIndicators,
   normalizeTrace,
 } from '../utils/executionTrace'
-import CaseDetails from './CaseDetails'
 import CaseExecutionTrace, { TraceStageRow } from './CaseExecutionTrace'
 import CaseStatusBadge from './CaseStatusBadge'
 
@@ -54,20 +52,6 @@ function matchesFilter(c, filter) {
   if (filter === 'active') return isActive(c)
 
   return isResolved(c)
-}
-
-// The full case row for the dedicated Case Details view (the investigation list
-// reads a lighter projection).
-async function fetchCaseById(caseId) {
-  const { data, error } = await supabase
-    .from('support_cases')
-    .select('*')
-    .eq('case_id', caseId)
-    .maybeSingle()
-
-  if (error) throw error
-
-  return data ?? null
 }
 
 function display(value) {
@@ -138,7 +122,7 @@ function ExecutionFlow({ flow }) {
   )
 }
 
-export default function InvestigationsData() {
+export default function InvestigationsData({ onOpenCaseDetails }) {
   const [rows, setRows] = useState([])
   const [customerMap, setCustomerMap] = useState({})
   const [selectedId, setSelectedId] = useState(null)
@@ -147,12 +131,6 @@ export default function InvestigationsData() {
   const [loadedTrace, setLoadedTrace] = useState(null)
   const [filter, setFilter] = useState('active')
   const [showTrace, setShowTrace] = useState(false)
-  const [sessionUser, setSessionUser] = useState(null)
-  const [details, setDetails] = useState({
-    status: 'idle',
-    caseRecord: null,
-    error: null,
-  })
 
   useEffect(() => {
     let cancelled = false
@@ -178,20 +156,6 @@ export default function InvestigationsData() {
     }
 
     load()
-
-    return () => {
-      cancelled = true
-    }
-  }, [])
-
-  // The signed-in user is only read here so the dedicated Case Details view can
-  // show the existing agent handling to authorized agents. No auth change.
-  useEffect(() => {
-    let cancelled = false
-
-    supabase.auth.getSession().then(({ data }) => {
-      if (!cancelled) setSessionUser(data.session?.user ?? null)
-    })
 
     return () => {
       cancelled = true
@@ -280,51 +244,6 @@ export default function InvestigationsData() {
 
   const tones = healthIndicators(trace)
 
-  const openCaseDetails = async () => {
-    if (!selectedCaseId) return
-
-    setDetails({ status: 'loading', caseRecord: null, error: null })
-
-    try {
-      const caseRecord = await fetchCaseById(selectedCaseId)
-
-      if (!caseRecord) {
-        throw new Error('Case not found.')
-      }
-
-      setDetails({ status: 'ready', caseRecord, error: null })
-    } catch (err) {
-      setDetails({
-        status: 'error',
-        caseRecord: null,
-        error: err?.message || 'Could not open the case details.',
-      })
-    }
-  }
-
-  const closeCaseDetails = () =>
-    setDetails({ status: 'idle', caseRecord: null, error: null })
-
-  const mergeCase = (updated) => {
-    setRows((prev) =>
-      prev.map((c) => (c.case_id === updated.case_id ? { ...c, ...updated } : c))
-    )
-  }
-
-  // The dedicated Case Details view is the existing component — the
-  // Investigations console links to it instead of duplicating it.
-  if (details.status === 'ready' && details.caseRecord) {
-    return (
-      <CaseDetails
-        key={details.caseRecord.case_id}
-        caseRecord={details.caseRecord}
-        user={sessionUser}
-        onBack={closeCaseDetails}
-        onCaseUpdated={mergeCase}
-      />
-    )
-  }
-
   return (
     <div className="dashboard-page investigations-page">
       <div className="page-heading">
@@ -350,14 +269,6 @@ export default function InvestigationsData() {
           <AlertTriangle size={15} />
 
           <span>Could not load investigations: {error}</span>
-        </div>
-      )}
-
-      {details.status === 'error' && (
-        <div className="dashboard-error-banner">
-          <AlertTriangle size={15} />
-
-          <span>{details.error}</span>
         </div>
       )}
 
@@ -734,16 +645,11 @@ export default function InvestigationsData() {
               <button
                 type="button"
                 className="investigation-btn primary"
-                onClick={openCaseDetails}
-                disabled={details.status === 'loading'}
+                onClick={() => onOpenCaseDetails?.(selectedCaseId)}
               >
                 <ExternalLink size={13} />
 
-                <span>
-                  {details.status === 'loading'
-                    ? 'Opening...'
-                    : 'View Case Details'}
-                </span>
+                <span>View Case Details</span>
               </button>
 
               <button
