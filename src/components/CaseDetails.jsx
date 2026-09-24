@@ -183,6 +183,40 @@ async function requestCaseSummary(payload) {
   return data
 }
 
+function AiCaseSummary({ state }) {
+  if (!state) {
+    return <p className="case-context-note">Generating summary...</p>
+  }
+
+  if (state.status === 'error') {
+    return <p className="case-context-note">{state.message}</p>
+  }
+
+  return (
+    <div className="ai-summary">
+      <div className="ai-summary-block">
+        <span>Issue</span>
+        <p>{state.data.issue}</p>
+      </div>
+
+      <div className="ai-summary-block">
+        <span>Investigation</span>
+        <p>{state.data.investigation}</p>
+      </div>
+
+      <div className="ai-summary-block">
+        <span>Why AI Escalated</span>
+        <p>{state.data.why_escalated}</p>
+      </div>
+
+      <div className="ai-summary-block">
+        <span>Recommended Agent Check</span>
+        <p>{state.data.recommended_agent_check}</p>
+      </div>
+    </div>
+  )
+}
+
 function Card({ title, children, full = false, aside = null }) {
   return (
     <section className={`panel case-details-card ${full ? 'full' : ''}`}>
@@ -494,10 +528,11 @@ export default function CaseDetails({ caseRecord, user, onBack, onCaseUpdated })
 
   const caseStatusValue = caseRecord.case_status || null
 
-  const isEscalated =
-    caseRecord.resolution_status === 'escalated' ||
-    caseStatusValue === 'in_review' ||
-    caseStatusValue === 'escalated'
+  // Human-agent handling is only offered for cases that carry a recorded
+  // case_status (escalated / in_review / human_resolved). Older escalated rows
+  // without that state keep their recorded escalation information but get no
+  // action controls — the same rule the previous Case Management screen used.
+  const hasHandlingState = Boolean(caseStatusValue)
 
   const citedEvidence = trace
     ? trace.evidence.citedIds
@@ -781,7 +816,7 @@ export default function CaseDetails({ caseRecord, user, onBack, onCaseUpdated })
           </Card>
         )}
 
-        {isEscalated && (
+        {hasHandlingState && (
           <Card
             title="HUMAN REVIEW"
             full
@@ -799,47 +834,7 @@ export default function CaseDetails({ caseRecord, user, onBack, onCaseUpdated })
               <div className="case-details-summary">
                 <span className="case-context-field-label">AI CASE SUMMARY</span>
 
-                {(() => {
-                  const summary = summaries[caseRecord.case_id]
-
-                  if (!summary) {
-                    return (
-                      <p className="case-context-note">
-                        Generating summary...
-                      </p>
-                    )
-                  }
-
-                  if (summary.status === 'error') {
-                    return (
-                      <p className="case-context-note">{summary.message}</p>
-                    )
-                  }
-
-                  return (
-                    <div className="ai-summary">
-                      <div className="ai-summary-block">
-                        <span>Issue</span>
-                        <p>{summary.data.issue}</p>
-                      </div>
-
-                      <div className="ai-summary-block">
-                        <span>Investigation</span>
-                        <p>{summary.data.investigation}</p>
-                      </div>
-
-                      <div className="ai-summary-block">
-                        <span>Why AI Escalated</span>
-                        <p>{summary.data.why_escalated}</p>
-                      </div>
-
-                      <div className="ai-summary-block">
-                        <span>Recommended Agent Check</span>
-                        <p>{summary.data.recommended_agent_check}</p>
-                      </div>
-                    </div>
-                  )
-                })()}
+                <AiCaseSummary state={summaries[caseRecord.case_id]} />
               </div>
             )}
 
@@ -948,6 +943,12 @@ export default function CaseDetails({ caseRecord, user, onBack, onCaseUpdated })
                 Sign in as an approved support agent to handle this case.
               </p>
             )}
+          </Card>
+        )}
+
+        {needsSummary && !hasHandlingState && (
+          <Card title="AI CASE SUMMARY" full>
+            <AiCaseSummary state={summaries[caseRecord.case_id]} />
           </Card>
         )}
 
