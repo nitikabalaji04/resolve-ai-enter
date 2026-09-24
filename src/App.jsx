@@ -1064,7 +1064,7 @@ function App() {
 
             <div>
               <strong>
-                AI System Online
+                AI SYSTEM READY
               </strong>
 
               <small>
@@ -1115,7 +1115,7 @@ function App() {
 
           <div className="topbar-status">
             <span></span>
-            LOCAL AI ACTIVE
+            LOCAL AI WORKBENCH
           </div>
         </header>
 
