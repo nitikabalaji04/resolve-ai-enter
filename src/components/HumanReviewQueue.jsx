@@ -1,13 +1,14 @@
 import { useEffect, useState } from 'react'
 import {
+  Activity,
   AlertTriangle,
-  Clock3,
+  Bot,
   Check,
-  Brain,
+  ChevronRight,
+  Clock3,
+  GitBranch,
   Inbox,
-  UserRound,
-  Package,
-  MessageCircle,
+  RotateCcw,
   ShieldCheck,
 } from 'lucide-react'
 import {
@@ -18,10 +19,17 @@ import {
   recentStatus,
   titleFrom,
   customerName,
-  capitalize,
   formatDate,
   sameDayLocal,
 } from '../utils/supportCases'
+import { buildAgentObservability, fetchTraceScan } from '../utils/executionTrace'
+import CaseStatusBadge from './CaseStatusBadge'
+
+// Agent Dashboard: what the stored execution traces actually recorded.
+//
+// Every number on this page is aggregated from real trace rows and real case
+// rows — no simulated activity, no invented timestamps and no claimed "online"
+// state. Nothing here is currently running: the page reports what happened.
 
 function reviewedTodayCount(rows) {
   const today = new Date()
@@ -34,18 +42,31 @@ function reviewedTodayCount(rows) {
   ).length
 }
 
-function humanReviewLabel(c) {
-  if (c.case_status === 'in_review') return 'IN REVIEW'
-
-  return 'REQUIRED'
+function percentLabel(percent) {
+  return typeof percent === 'number' ? `${percent}%` : '—'
 }
 
-export default function HumanReviewQueue() {
+function StatTile({ icon: Icon, label, value }) {
+  return (
+    <div className="stat-card">
+      <div className="stat-icon">
+        <Icon size={18} />
+      </div>
+
+      <div>
+        <span>{label}</span>
+        <strong>{value}</strong>
+      </div>
+    </div>
+  )
+}
+
+export default function HumanReviewQueue({ onOpenCaseDetails }) {
   const [rows, setRows] = useState([])
   const [customerMap, setCustomerMap] = useState({})
-  const [selectedId, setSelectedId] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
+  const [loadedMetrics, setLoadedMetrics] = useState(null)
 
   useEffect(() => {
     let cancelled = false
@@ -77,40 +98,78 @@ export default function HumanReviewQueue() {
     }
   }, [])
 
+  // Recorded agent activity comes from the stored execution traces. The metrics
+  // are computed from the rows that were really returned, and the page states
+  // how many traces that was.
+  useEffect(() => {
+    let cancelled = false
+
+    const load = async () => {
+      const result = await fetchTraceScan()
+
+      if (cancelled) return
+
+      if (result.status === 'failed') {
+        setLoadedMetrics({ status: 'error', data: null, error: result.error })
+
+        return
+      }
+
+      setLoadedMetrics({
+        status: 'ready',
+        data: buildAgentObservability(result.rows),
+        error: null,
+      })
+    }
+
+    load()
+
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  const metricsState =
+    loadedMetrics || { status: 'loading', data: null, error: null }
+
+  const metrics = metricsState.data
+  const metricsReady = metricsState.status === 'ready' && metrics !== null
+
   const queue = rows.filter(isActive)
   const escalated = rows.filter(isEscalated).length
   const reviewedToday = reviewedTodayCount(rows)
-  const firstInQueue = queue[0] || null
 
-  const selected =
-    rows.find((c) => c.case_id === selectedId) || firstInQueue || null
+  const scopeNote = !metricsReady
+    ? 'Recorded metrics unavailable.'
+    : metrics.limited
+      ? `Recorded across the ${metrics.tracesObserved} most recent stored execution traces.`
+      : `Recorded across all ${metrics.tracesObserved} stored execution traces.`
 
-  const isSelectedRow = (c) =>
-    selectedId
-      ? c.case_id === selectedId
-      : firstInQueue !== null && c.case_id === firstInQueue.case_id
+  const metricValue = (value) =>
+    metricsState.status === 'loading' ? '…' : metricsReady ? value : '—'
+
+  const openCase = (caseId) => onOpenCaseDetails?.(caseId)
 
   return (
     <div className="dashboard-page agent-dashboard-page">
       <div className="page-heading">
         <div>
-          <p className="eyebrow">
-            HUMAN AGENT DASHBOARD
-          </p>
+          <p className="eyebrow">HUMAN AGENT</p>
 
-          <h1>
-            Human Review Queue
-          </h1>
+          <h1>Agent Dashboard</h1>
 
           <p>
-            Review cases that require human attention after AI
-            investigation.
+            Recorded agent activity, decision outcomes and investigation
+            health, aggregated from the stored execution traces.
           </p>
         </div>
 
         <div className="ai-status">
           <span></span>
-          AI HANDOFF READY
+
+          {metricsReady
+            ? `${metrics.tracesObserved} TRACES OBSERVED`
+            : 'LOADING TRACES'}
         </div>
       </div>
 
@@ -118,372 +177,492 @@ export default function HumanReviewQueue() {
         <div className="dashboard-error-banner">
           <AlertTriangle size={15} />
 
-          <span>
-            Could not load the review queue: {error}
-          </span>
+          <span>Could not load the review queue: {error}</span>
         </div>
       )}
 
+      {metricsState.status === 'error' && (
+        <div className="dashboard-error-banner">
+          <AlertTriangle size={15} />
+
+          <span>Could not load stored traces: {loadedMetrics.error}</span>
+        </div>
+      )}
+
+      {/* Recorded performance ------------------------------------------------- */}
       <div className="stats-grid">
-        <div className="stat-card">
-          <div className="stat-icon">
-            <AlertTriangle size={18} />
-          </div>
+        <StatTile
+          icon={Activity}
+          label="Cases Processed"
+          value={metricValue(metrics?.performance.casesProcessed)}
+        />
 
-          <div>
-            <span>Escalated Cases</span>
-            <strong>
-              {loading ? '…' : error ? '—' : escalated}
-            </strong>
-          </div>
-        </div>
+        <StatTile
+          icon={Check}
+          label="Completed Investigations"
+          value={metricValue(metrics?.performance.completedInvestigations)}
+        />
 
-        <div className="stat-card">
-          <div className="stat-icon">
-            <Clock3 size={18} />
-          </div>
+        <StatTile
+          icon={GitBranch}
+          label="Blocked Investigations"
+          value={metricValue(metrics?.performance.blockedInvestigations)}
+        />
 
-          <div>
-            <span>Pending Review</span>
-            <strong>
-              {loading ? '…' : error ? '—' : queue.length}
-            </strong>
-          </div>
-        </div>
+        <StatTile
+          icon={AlertTriangle}
+          label="Escalated Cases"
+          value={metricValue(metrics?.performance.escalatedCases)}
+        />
 
-        <div className="stat-card">
-          <div className="stat-icon">
-            <Check size={18} />
-          </div>
+        <StatTile
+          icon={RotateCcw}
+          label="Re-Investigation Cases"
+          value={metricValue(metrics?.performance.reinvestigationCases)}
+        />
 
-          <div>
-            <span>Reviewed Today</span>
-            <strong>
-              {loading ? '…' : error ? '—' : reviewedToday}
-            </strong>
-          </div>
-        </div>
+        <StatTile
+          icon={Clock3}
+          label="Avg Execution Time"
+          value={metricValue(metrics?.performance.avgDuration)}
+        />
       </div>
 
-      <div className="agent-workspace">
-        <section className="panel agent-case-panel">
-          <div className="panel-header">
-            <div>
-              <p className="eyebrow">
-                ESCALATED CASES
-              </p>
+      <p className="dashboard-note">{scopeNote}</p>
 
-              <h3>
-                Review Queue
-              </h3>
-            </div>
+      {/* Agent status --------------------------------------------------------- */}
+      <section className="panel">
+        <div className="panel-header">
+          <div>
+            <p className="eyebrow">AGENT STATUS</p>
 
-            <span className="live-badge">
-              {loading ? '…' : `${queue.length} PENDING`}
-            </span>
+            <h3>Pipeline Stages Observed</h3>
           </div>
 
-          {loading && (
+          <Bot size={19} />
+        </div>
+
+        <div className="agent-status-grid">
+          {(metrics?.agents || []).length === 0 ? (
             <p className="dashboard-note">
-              Loading queue...
+              {metricsState.status === 'loading'
+                ? 'Loading agent status...'
+                : 'No stored execution traces to report on.'}
             </p>
-          )}
-
-          {!loading && error && (
-            <p className="dashboard-note">
-              Queue unavailable.
-            </p>
-          )}
-
-          {!loading && !error && queue.length === 0 && (
-            <div className="empty-state">
-              <Inbox size={28} />
-
-              <strong>
-                No cases awaiting human review
-              </strong>
-
-              <p>
-                Every case has been handled by ResolveAI or resolved by
-                a human agent.
-              </p>
-            </div>
-          )}
-
-          {!loading &&
-            !error &&
-            queue.map((c) => {
-              const status = recentStatus(c)
+          ) : (
+            metrics.agents.map((agent) => {
+              const Icon = agent.icon
+              const observed = agent.executions > 0
 
               return (
                 <div
-                  key={c.case_id}
-                  className={`case-row queue-case-row ${
-                    isSelectedRow(c) ? 'selected' : ''
-                  }`}
-                  onClick={() => setSelectedId(c.case_id)}
+                  key={agent.key}
+                  className={`agent-status-card ${observed ? 'observed' : 'idle'}`}
                 >
-                  <div className="case-info">
-                    <strong>{c.case_id}</strong>
+                  <div className="agent-status-head">
+                    <div className="agent-status-icon">
+                      <Icon size={14} />
+                    </div>
 
-                    <span>{titleFrom(c)}</span>
+                    <strong>{agent.label}</strong>
                   </div>
 
-                  <span className={status.className}>
-                    {status.label}
+                  <span
+                    className={`agent-status-chip ${observed ? 'observed' : 'idle'}`}
+                  >
+                    {observed ? 'Observed' : 'No recorded runs'}
+                  </span>
+
+                  <div className="agent-status-facts">
+                    <span>{`${agent.executions} executions`}</span>
+                    <span>{`${agent.completed} completed`}</span>
+                    <span>{`${agent.failedBlocked} failed/blocked`}</span>
+                  </div>
+
+                  <span className="agent-status-seen">
+                    {agent.lastSeen
+                      ? `Last recorded ${formatDate(agent.lastSeen)}`
+                      : 'No recorded timestamp'}
                   </span>
                 </div>
               )
-            })}
-        </section>
+            })
+          )}
+        </div>
+      </section>
 
-        <section className="panel ai-handoff-panel">
-          <div className="panel-header">
-            <div>
-              <p className="eyebrow">
-                AI HANDOFF
-              </p>
+      {/* Agent execution table ------------------------------------------------ */}
+      <section className="panel">
+        <div className="panel-header">
+          <div>
+            <p className="eyebrow">AGENT PERFORMANCE</p>
 
-              <h3>
-                {selected
-                  ? `Case ${selected.case_id}`
-                  : 'Investigation Summary'}
-              </h3>
-            </div>
-
-            <div className="ai-handoff-icon">
-              <Brain size={19} />
-            </div>
+            <h3>Agent Execution</h3>
           </div>
 
-          {!selected ? (
+          <span className="panel-badge">
+            {metricsReady ? `${metrics.tracesObserved} TRACES` : '—'}
+          </span>
+        </div>
+
+        <div className="case-table-wrapper">
+          <table className="case-table">
+            <thead>
+              <tr>
+                <th>AGENT</th>
+                <th>EXECUTIONS</th>
+                <th>COMPLETED</th>
+                <th>FAILED / BLOCKED</th>
+                <th>AVG DURATION</th>
+              </tr>
+            </thead>
+
+            <tbody>
+              {(metrics?.agents || []).length === 0 ? (
+                <tr>
+                  <td colSpan="5">
+                    <span className="stage-text">
+                      {metricsState.status === 'loading'
+                        ? 'Loading agent executions...'
+                        : 'No recorded agent executions.'}
+                    </span>
+                  </td>
+                </tr>
+              ) : (
+                metrics.agents.map((agent) => (
+                  <tr key={agent.key}>
+                    <td>
+                      <span className="investigation-cell-stack">
+                        <strong>{agent.label}</strong>
+                      </span>
+                    </td>
+
+                    <td>{agent.executions}</td>
+
+                    <td>{agent.completed}</td>
+
+                    <td>{agent.failedBlocked}</td>
+
+                    <td>{agent.avgDuration}</td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      {/* Decision outcomes ---------------------------------------------------- */}
+      <section className="panel">
+        <div className="panel-header">
+          <div>
+            <p className="eyebrow">DECISION OUTCOMES</p>
+
+            <h3>Recorded Decision Agent Results</h3>
+          </div>
+
+          <GitBranch size={19} />
+        </div>
+
+        <div className="agent-section-body">
+          {(metrics?.decisionOutcomes || []).length === 0 ? (
             <p className="dashboard-note">
-              Select a case to view its investigation summary.
+              {metricsState.status === 'loading'
+                ? 'Loading decision outcomes...'
+                : 'No recorded decisions.'}
             </p>
           ) : (
             <>
-              <div className="agent-case-grid">
-                <div className="agent-info-card">
-                  <UserRound size={17} />
+              <div className="investigation-indicators">
+                {metrics.decisionOutcomes.map((outcome) => {
+                  const tone =
+                    outcome.key === 'APPROVE'
+                      ? 'ok'
+                      : outcome.key === 'DENY'
+                        ? 'danger'
+                        : outcome.key === 'INFORM'
+                          ? 'info'
+                          : 'warn'
 
-                  <div>
-                    <span>Customer</span>
-                    <strong>{customerName(selected, customerMap)}</strong>
-                  </div>
-                </div>
+                  return (
+                    <div
+                      key={outcome.key}
+                      className={`investigation-indicator is-${tone}`}
+                    >
+                      <span>{outcome.key}</span>
 
-                <div className="agent-info-card">
-                  <Package size={17} />
-
-                  <div>
-                    <span>Order</span>
-                    <strong>{selected.order_id || '—'}</strong>
-                  </div>
-                </div>
-
-                <div className="agent-info-card">
-                  <MessageCircle size={17} />
-
-                  <div>
-                    <span>Issue</span>
-                    <strong>{titleFrom(selected)}</strong>
-                  </div>
-                </div>
-
-                <div className="agent-info-card">
-                  <Clock3 size={17} />
-
-                  <div>
-                    <span>Case Status</span>
-                    <strong>
-                      {capitalize(selected.case_status || selected.resolution_status)}
-                    </strong>
-                  </div>
-                </div>
+                      <strong>
+                        {`${outcome.count} · ${percentLabel(outcome.percent)}`}
+                      </strong>
+                    </div>
+                  )
+                })}
               </div>
 
-              <div className="ai-handoff-status">
-                <Check size={15} />
-
-                {capitalize(selected.decision)} — {selected.reason || 'Reason recorded'}
-              </div>
-
-              <p className="ai-handoff-description">
-                {selected.customer_message ||
-                  'No customer message recorded for this case.'}
-              </p>
-
-              <div className="ai-findings">
-                <div>
-                  <span>Customer verified</span>
-                  <strong>{selected.customer_id ? 'YES' : '—'}</strong>
-                </div>
-
-                <div>
-                  <span>Order located</span>
-                  <strong>{selected.order_id ? 'YES' : '—'}</strong>
-                </div>
-
-                <div>
-                  <span>AI decision</span>
-                  <strong>{capitalize(selected.decision)}</strong>
-                </div>
-
-                <div>
-                  <span>Resolution</span>
-                  <strong>{capitalize(selected.resolution_status)}</strong>
-                </div>
-              </div>
+              {metrics.performance.undecidedTraces > 0 && (
+                <p className="dashboard-note">
+                  {`${metrics.performance.undecidedTraces} trace(s) have no recorded decision: the decision agent did not produce one.`}
+                </p>
+              )}
             </>
           )}
-        </section>
-      </div>
+        </div>
+      </section>
 
-      <div className="agent-lower-grid">
+      {/* Investigation health ------------------------------------------------- */}
+      <section className="panel">
+        <div className="panel-header">
+          <div>
+            <p className="eyebrow">INVESTIGATION HEALTH</p>
+
+            <h3>Recorded Investigation Signals</h3>
+          </div>
+
+          <ShieldCheck size={19} />
+        </div>
+
+        <div className="agent-section-body">
+          {!metricsReady ? (
+            <p className="dashboard-note">
+              {metricsState.status === 'loading'
+                ? 'Loading investigation health...'
+                : 'No recorded investigation health.'}
+            </p>
+          ) : (
+            <div className="investigation-indicators">
+              <div
+                className={`investigation-indicator is-${metrics.health.conflicts > 0 ? 'warn' : 'ok'}`}
+              >
+                <span>Conflicts Detected</span>
+                <strong>{metrics.health.conflicts}</strong>
+              </div>
+
+              <div
+                className={`investigation-indicator is-${metrics.health.uncertainties > 0 ? 'warn' : 'ok'}`}
+              >
+                <span>Uncertainty Detected</span>
+                <strong>{metrics.health.uncertainties}</strong>
+              </div>
+
+              <div
+                className={`investigation-indicator is-${metrics.health.reinvestigations > 0 ? 'info' : 'ok'}`}
+              >
+                <span>Re-Investigations</span>
+                <strong>{metrics.health.reinvestigations}</strong>
+              </div>
+
+              <div
+                className={`investigation-indicator is-${metrics.health.gateBlocks > 0 ? 'warn' : 'ok'}`}
+              >
+                <span>Gate Blocks</span>
+                <strong>{metrics.health.gateBlocks}</strong>
+              </div>
+            </div>
+          )}
+        </div>
+      </section>
+
+      {/* Re-investigation monitoring (only when recorded) ---------------------- */}
+      {metricsReady && metrics.reinvestigation.cases > 0 && (
         <section className="panel">
           <div className="panel-header">
             <div>
-              <p className="eyebrow">
-                EVIDENCE CONSIDERED
-              </p>
+              <p className="eyebrow">RE-INVESTIGATION MONITORING</p>
 
-              <h3>
-                Investigation Evidence
-              </h3>
+              <h3>Recorded Re-Investigation Rounds</h3>
             </div>
 
-            <ShieldCheck size={19} />
+            <RotateCcw size={19} />
           </div>
 
-          {!selected ? (
-            <p className="dashboard-note">
-              Evidence will appear once a case is selected.
-            </p>
-          ) : (
-            <div className="agent-evidence-list">
-              <div className="agent-evidence-row">
-                <Check size={15} />
-
-                <div>
-                  <strong>Customer identity verified</strong>
-                  <span>
-                    {customerName(selected, customerMap)}
-                  </span>
-                </div>
+          <div className="agent-section-body">
+            <div className="trace-facts">
+              <div>
+                <span>Cases requiring</span>
+                <strong>{metrics.reinvestigation.cases}</strong>
               </div>
 
-              <div className="agent-evidence-row">
-                <Check size={15} />
-
-                <div>
-                  <strong>
-                    Order {selected.order_id || 'record'} located
-                  </strong>
-                  <span>
-                    {selected.order_id
-                      ? 'Order information retrieved successfully.'
-                      : 'No order attached to this case.'}
-                  </span>
-                </div>
-              </div>
-
-              <div className="agent-evidence-row warning">
-                <AlertTriangle size={15} />
-
-                <div>
-                  <strong>Escalated to human review</strong>
-                  <span>
-                    {selected.escalation_reason || 'Awaiting human decision.'}
-                  </span>
-                </div>
-              </div>
-
-              <div className="agent-evidence-row">
-                <Check size={15} />
-
-                <div>
-                  <strong>AI decision recorded</strong>
-                  <span>
-                    {capitalize(selected.decision)} — {selected.reason || 'Reason recorded'}
-                  </span>
-                </div>
-              </div>
-
-              <div className="agent-evidence-row">
-                <Check size={15} />
-
-                <div>
-                  <strong>Case created</strong>
-                  <span>{formatDate(selected.created_at)}</span>
-                </div>
+              <div>
+                <span>Total rounds</span>
+                <strong>{metrics.reinvestigation.rounds}</strong>
               </div>
             </div>
-          )}
+
+            <div className="trace-domains">
+              <span>Affected domains</span>
+
+              {metrics.reinvestigation.domains.length === 0 ? (
+                <em>—</em>
+              ) : (
+                metrics.reinvestigation.domains.map((domain) => (
+                  <span key={domain.domain} className="trace-chip">
+                    {`${domain.domain} · ${domain.count}`}
+                  </span>
+                ))
+              )}
+            </div>
+
+            <div className="trace-evidence-block">
+              <span>Round results</span>
+
+              {metrics.reinvestigation.results.length === 0 ? (
+                <em>—</em>
+              ) : (
+                metrics.reinvestigation.results.map((result) => (
+                  <div key={result.result} className="trace-evidence-row">
+                    <span>{result.result}</span>
+
+                    <strong>{result.count}</strong>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
         </section>
+      )}
 
-        <section className="panel recommendation-panel">
-          <div className="panel-header">
-            <div>
-              <p className="eyebrow">
-                AI RECOMMENDATION
-              </p>
+      {/* Recent agent activity ------------------------------------------------ */}
+      <section className="panel">
+        <div className="panel-header">
+          <div>
+            <p className="eyebrow">RECENT AGENT ACTIVITY</p>
 
-              <h3>
-                Human Review Required
-              </h3>
-            </div>
-
-            <AlertTriangle size={19} />
+            <h3>Newest Recorded Stages</h3>
           </div>
 
-          {!selected ? (
-            <p className="dashboard-note">
-              Recommendation will appear once a case is selected.
+          <span className="panel-badge">
+            {metricsReady ? `${metrics.totalActivity} RECORDED` : '—'}
+          </span>
+        </div>
+
+        <div className="case-table-wrapper">
+          <table className="case-table">
+            <thead>
+              <tr>
+                <th>CASE</th>
+                <th>AGENT</th>
+                <th>STATUS</th>
+                <th>DURATION</th>
+                <th>TIME</th>
+              </tr>
+            </thead>
+
+            <tbody>
+              {!metricsReady || metrics.recentActivity.length === 0 ? (
+                <tr>
+                  <td colSpan="5">
+                    <span className="stage-text">
+                      {metricsState.status === 'loading'
+                        ? 'Loading recorded activity...'
+                        : 'No recorded stage activity.'}
+                    </span>
+                  </td>
+                </tr>
+              ) : (
+                metrics.recentActivity.map((item) => (
+                  <tr
+                    key={item.key}
+                    className="investigation-table-row"
+                    onClick={() => openCase(item.caseId)}
+                  >
+                    <td>
+                      <button className="case-id-button" type="button">
+                        {item.caseId}
+                      </button>
+                    </td>
+
+                    <td>{item.label}</td>
+
+                    <td>
+                      <span
+                        className={`trace-stage-status ${item.statusClass}`}
+                      >
+                        {item.statusLabel}
+                      </span>
+                    </td>
+
+                    <td>{item.duration}</td>
+
+                    <td>{formatDate(item.timestamp)}</td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      {/* Human review queue (preserved, compact) ------------------------------ */}
+      <section className="panel">
+        <div className="panel-header">
+          <div>
+            <p className="eyebrow">HUMAN REVIEW QUEUE</p>
+
+            <h3>Cases Awaiting Review</h3>
+          </div>
+
+          <span className="panel-badge">
+            {loading
+              ? '…'
+              : `${queue.length} PENDING · ${reviewedToday} REVIEWED TODAY`}
+          </span>
+        </div>
+
+        {loading && <p className="dashboard-note">Loading queue...</p>}
+
+        {!loading && error && (
+          <p className="dashboard-note">Queue unavailable.</p>
+        )}
+
+        {!loading && !error && queue.length === 0 && (
+          <div className="empty-state">
+            <Inbox size={28} />
+
+            <strong>No cases awaiting human review</strong>
+
+            <p>
+              Every case has been handled by ResolveAI or resolved by a human
+              agent.
             </p>
-          ) : (
-            <>
-              <div className="recommendation-box">
-                <strong>
-                  Recommended Action
-                </strong>
+          </div>
+        )}
 
-                <p>
-                  {selected.reason ||
-                    'Human judgment required for this case.'}
-                </p>
-              </div>
+        {!loading &&
+          !error &&
+          queue.map((c) => {
+            const status = recentStatus(c)
 
-              <div className="escalation-reason">
-                <span>
-                  ESCALATION REASON
-                </span>
+            return (
+              <div
+                key={c.case_id}
+                className="case-row queue-case-row"
+                onClick={() => openCase(c.case_id)}
+              >
+                <div className="case-info">
+                  <strong>{c.case_id}</strong>
 
-                <p>
-                  {selected.escalation_reason ||
-                    'No escalation reason recorded.'}
-                </p>
-              </div>
-
-              <div className="human-status">
-                <div>
-                  <span>AI Decision</span>
-                  <strong>{capitalize(selected.decision)}</strong>
+                  <span>
+                    {`${customerName(c, customerMap)} · ${titleFrom(c)}`}
+                  </span>
                 </div>
 
-                <div>
-                  <span>Human Review</span>
-                  <strong>{humanReviewLabel(selected)}</strong>
-                </div>
+                <div className="agent-queue-right">
+                  <CaseStatusBadge value={c.resolution_status} />
 
-                <div>
-                  <span>Action</span>
-                  <strong>{capitalize(selected.action)}</strong>
+                  <span className={status.className}>{status.label}</span>
+
+                  <ChevronRight size={14} className="case-list-chevron" />
                 </div>
               </div>
-            </>
-          )}
-        </section>
-      </div>
+            )
+          })}
+
+        {!loading && !error && queue.length > 0 && (
+          <p className="dashboard-note">
+            {`${escalated} escalated case(s) recorded in total. Select a case to open its details.`}
+          </p>
+        )}
+      </section>
     </div>
   )
 }

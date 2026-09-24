@@ -845,7 +845,9 @@ function App() {
     <InvestigationsData onOpenCaseDetails={openCaseDetails} />
   )
 
-  const renderAgentDashboard = () => <HumanReviewQueue />
+  const renderAgentDashboard = () => (
+    <HumanReviewQueue onOpenCaseDetails={openCaseDetails} />
+  )
 
   // IMPORTANT:
   // Call the render functions with ()

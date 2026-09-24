@@ -5393,3 +5393,130 @@ button {
 
   text-align: right;
 }
+
+/* =========================================================
+   AGENT OBSERVABILITY (Agent Dashboard)
+   Appended block — same palette/tokens as the rest of ResolveAI.
+   ========================================================= */
+
+.agent-status-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 12px;
+
+  padding: 16px 18px;
+}
+
+.agent-status-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+
+  padding: 12px 13px;
+
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid #1e2731;
+  border-left-width: 2px;
+  border-radius: 11px;
+}
+
+.agent-status-card.observed {
+  border-left-color: #20e0a8;
+}
+
+.agent-status-card.idle {
+  border-left-color: #3a4653;
+}
+
+.agent-status-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.agent-status-head strong {
+  font-size: 12px;
+  font-weight: 650;
+  color: #e8f0f6;
+  overflow-wrap: anywhere;
+}
+
+.agent-status-icon {
+  width: 26px;
+  height: 26px;
+  flex-shrink: 0;
+
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  color: #20dfff;
+
+  background: rgba(32, 223, 255, 0.06);
+  border: 1px solid rgba(32, 223, 255, 0.16);
+  border-radius: 8px;
+}
+
+.agent-status-chip {
+  align-self: flex-start;
+
+  padding: 4px 9px;
+
+  border-radius: 999px;
+
+  font-size: 9px;
+  font-weight: 650;
+  letter-spacing: 0.3px;
+}
+
+.agent-status-chip.observed {
+  color: #20e0a8;
+  background: rgba(32, 224, 168, 0.07);
+  border: 1px solid rgba(32, 224, 168, 0.18);
+}
+
+.agent-status-chip.idle {
+  color: #71869a;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid #1b232d;
+}
+
+.agent-status-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+}
+
+.agent-status-facts span {
+  font-size: 10.5px;
+  color: #9fb3c4;
+}
+
+.agent-status-seen {
+  font-size: 9.5px;
+  color: #6c7887;
+}
+
+/* Shared body padding for the dashboard panels that are not tables */
+.agent-section-body {
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+
+  padding: 16px 18px;
+}
+
+.agent-queue-right {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* Recorded "no decision" indicator */
+.investigation-indicator.is-danger {
+  border-left-color: #f08a8a;
+}
+
+.investigation-indicator.is-danger strong {
+  color: #f08a8a;
+}

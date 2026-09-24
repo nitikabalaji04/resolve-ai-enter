@@ -858,6 +858,302 @@ export function healthIndicators(trace) {
 }
 
 // ---------------------------------------------------------------------------
+// Agent observability (Agent Dashboard)
+// ---------------------------------------------------------------------------
+
+// The pipeline stages the Agent Dashboard reports on. These are the real stages
+// the backend records — no agent type is invented here.
+const OBSERVED_AGENT_STAGES = [
+  { key: 'triage', label: 'Triage Agent' },
+  { key: 'investigation_planner', label: 'Investigation Planner' },
+  { key: 'customer_agent', label: 'Customer Agent' },
+  { key: 'order_agent', label: 'Order Agent' },
+  { key: 'delivery_agent', label: 'Delivery Agent' },
+  { key: 'policy_agent', label: 'Policy Agent' },
+  { key: 'evidence_engine', label: 'Evidence Engine' },
+  { key: 'decision_agent', label: 'Decision Agent' },
+]
+
+const DECISION_BUCKETS = ['APPROVE', 'DENY', 'INFORM', 'ESCALATE']
+
+// How many stored traces one dashboard load reads. Every metric is computed from
+// the rows that were actually returned, and the scope is reported with them.
+export const TRACE_SCAN_LIMIT = 300
+
+// Read-only scan of the stored traces (newest first). Used for the recorded
+// metrics only; the per-case views keep fetching a single trace.
+export async function fetchTraceScan(limit = TRACE_SCAN_LIMIT) {
+  try {
+    const { data, error } = await supabase
+      .from(TRACE_TABLE)
+      .select(TRACE_COLUMNS)
+      .order('created_at', { ascending: false })
+      .limit(limit)
+
+    if (error) {
+      return {
+        status: 'failed',
+        rows: [],
+        limit,
+        error: error.message || 'Could not load stored traces.',
+      }
+    }
+
+    return {
+      status: 'found',
+      rows: Array.isArray(data) ? data : [],
+      limit,
+      error: null,
+    }
+  } catch (err) {
+    return {
+      status: 'failed',
+      rows: [],
+      limit,
+      error: err?.message || 'Could not load stored traces.',
+    }
+  }
+}
+
+function meanOf(values) {
+  const numbers = values.filter(
+    (value) => typeof value === 'number' && Number.isFinite(value)
+  )
+
+  if (numbers.length === 0) return null
+
+  return numbers.reduce((total, value) => total + value, 0) / numbers.length
+}
+
+function countInto(map, key) {
+  if (!isPresent(key)) return
+
+  map.set(String(key), (map.get(String(key)) || 0) + 1)
+}
+
+function mapToRows(map, keyName) {
+  return Array.from(map.entries())
+    .map(([key, count]) => ({ [keyName]: key, count }))
+    .sort((a, b) => b.count - a.count || String(a[keyName]).localeCompare(String(b[keyName])))
+}
+
+// buildAgentObservability(traceRows) -> every recorded metric the Agent
+// Dashboard shows. Pure: it only aggregates the traces it is given.
+export function buildAgentObservability(traceRows) {
+  const rows = Array.isArray(traceRows) ? traceRows : []
+
+  const traces = []
+  let unusableTraces = 0
+
+  for (const row of rows) {
+    const trace = normalizeTrace(row?.trace)
+
+    if (!trace) {
+      unusableTraces += 1
+      continue
+    }
+
+    traces.push({
+      caseId: trace.caseId || (typeof row?.case_id === 'string' ? row.case_id : ''),
+      storedAt: typeof row?.created_at === 'string' ? row.created_at : null,
+      trace,
+    })
+  }
+
+  const stageStats = OBSERVED_AGENT_STAGES.map((definition) => ({
+    key: definition.key,
+    label: definition.label,
+    icon: stageIcon(definition.key),
+    executions: 0,
+    completed: 0,
+    failedBlocked: 0,
+    skipped: 0,
+    lastSeen: null,
+    durations: [],
+  }))
+
+  const stageByKey = new Map(stageStats.map((stat) => [stat.key, stat]))
+
+  const decisions = new Map()
+  const outcomes = new Map()
+  const reinvestigationDomains = new Map()
+  const reinvestigationResults = new Map()
+
+  const activity = []
+  const traceDurations = []
+
+  let gateBlocks = 0
+  let undecidedTraces = 0
+  let conflicts = 0
+  let uncertainties = 0
+  let reinvestigationCases = 0
+  let reinvestigationRounds = 0
+
+  for (const entry of traces) {
+    const { trace, caseId } = entry
+
+    if (typeof trace.totalDuration.ms === 'number') {
+      traceDurations.push(trace.totalDuration.ms)
+    }
+
+    for (const stage of trace.stages) {
+      const stat = stageByKey.get(stage.stage)
+
+      if (stat) {
+        stat.executions += 1
+
+        if (stage.status === 'completed') stat.completed += 1
+        if (stage.status === 'failed' || stage.status === 'blocked') {
+          stat.failedBlocked += 1
+        }
+        if (stage.status === 'skipped') stat.skipped += 1
+        if (typeof stage.durationMs === 'number') stat.durations.push(stage.durationMs)
+
+        const seen = stage.completedAt || stage.startedAt
+
+        if (seen && (!stat.lastSeen || seen > stat.lastSeen)) stat.lastSeen = seen
+      }
+
+      // Recent activity uses only stages that carry a real recorded timestamp.
+      const timestamp = stage.completedAt || stage.startedAt
+
+      if (timestamp) {
+        activity.push({
+          key: `${caseId}-${stage.key}`,
+          caseId,
+          stage: stage.stage,
+          label: stage.label,
+          status: stage.status,
+          statusLabel: stage.statusLabel,
+          statusClass: stage.statusClass,
+          duration: stage.duration,
+          durationMs: stage.durationMs,
+          timestamp,
+        })
+      }
+    }
+
+    const gate = findLastStage(trace.stages, 'decision_gate')
+    const decisionAgent = findLastStage(trace.stages, 'decision_agent')
+    const outcome = findLastStage(trace.stages, 'case_outcome')
+
+    const gateBlocked =
+      gate && isPresent(gate.summary.status) && String(gate.summary.status).toUpperCase() === 'BLOCK'
+
+    if (gateBlocked) gateBlocks += 1
+
+    const decision = isPresent(decisionAgent?.summary?.decision)
+      ? String(decisionAgent.summary.decision).toUpperCase()
+      : null
+
+    if (decision && DECISION_BUCKETS.includes(decision)) {
+      countInto(decisions, decision)
+    } else if (gateBlocked) {
+      countInto(decisions, 'BLOCKED')
+    } else {
+      undecidedTraces += 1
+    }
+
+    if (outcome && isPresent(outcome.summary.status)) {
+      countInto(outcomes, String(outcome.summary.status))
+    }
+
+    const health = trace.health
+
+    if (isPresent(health.conflictStatus) && health.conflictStatus !== 'none') {
+      conflicts += 1
+    }
+
+    if (isPresent(health.uncertaintyStatus) && health.uncertaintyStatus !== 'none') {
+      uncertainties += 1
+    }
+
+    if (health.performed) {
+      reinvestigationCases += 1
+      reinvestigationRounds +=
+        typeof health.rounds === 'number' ? health.rounds : health.roundsDetail.length
+
+      for (const round of health.roundsDetail) {
+        for (const domain of round.targetDomains) {
+          countInto(reinvestigationDomains, domain)
+        }
+
+        if (isPresent(round.result)) countInto(reinvestigationResults, round.result)
+      }
+    }
+  }
+
+  const tracesObserved = traces.length
+  const percentOfTraces = (count) =>
+    tracesObserved === 0 ? null : Math.round((count / tracesObserved) * 100)
+
+  const decisionOutcomes = DECISION_BUCKETS.map((bucket) => {
+    const count = decisions.get(bucket) || 0
+
+    return { key: bucket, count, percent: percentOfTraces(count) }
+  })
+
+  const blockedCount = decisions.get('BLOCKED') || 0
+
+  decisionOutcomes.push({
+    key: 'BLOCKED',
+    count: blockedCount,
+    percent: percentOfTraces(blockedCount),
+  })
+
+  const agents = stageStats.map((stat) => ({
+    key: stat.key,
+    label: stat.label,
+    icon: stat.icon,
+    executions: stat.executions,
+    completed: stat.completed,
+    failedBlocked: stat.failedBlocked,
+    skipped: stat.skipped,
+    lastSeen: stat.lastSeen,
+    avgDurationMs: meanOf(stat.durations),
+    avgDuration: formatDuration(meanOf(stat.durations)),
+  }))
+
+  return {
+    tracesObserved,
+    unusableTraces,
+    scanned: rows.length,
+    limited: rows.length >= TRACE_SCAN_LIMIT,
+    performance: {
+      casesProcessed: tracesObserved,
+      completedInvestigations: outcomes.get('resolved') || 0,
+      blockedInvestigations: gateBlocks,
+      escalatedCases: outcomes.get('escalated') || 0,
+      reinvestigationCases,
+      avgDurationMs: meanOf(traceDurations),
+      avgDuration: formatDuration(meanOf(traceDurations)),
+      outcomes: mapToRows(outcomes, 'status'),
+      undecidedTraces,
+    },
+    agents,
+    decisionOutcomes,
+    health: {
+      conflicts,
+      uncertainties,
+      reinvestigations: reinvestigationCases,
+      gateBlocks,
+    },
+    reinvestigation: {
+      cases: reinvestigationCases,
+      rounds: reinvestigationRounds,
+      domains: mapToRows(reinvestigationDomains, 'domain'),
+      results: mapToRows(reinvestigationResults, 'result'),
+    },
+    // Newest recorded activity first — real timestamps only.
+    recentActivity: activity
+      .slice()
+      .sort((a, b) => (a.timestamp < b.timestamp ? 1 : a.timestamp > b.timestamp ? -1 : 0))
+      .slice(0, 12),
+    totalActivity: activity.length,
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Normalization
 // ---------------------------------------------------------------------------
 
@@ -894,6 +1190,10 @@ export function normalizeTrace(trace) {
       statusLabel: statusLabel(status),
       statusClass: statusClass(status),
       duration: formatDuration(entry?.duration_ms),
+      durationMs:
+        typeof entry?.duration_ms === 'number' && Number.isFinite(entry.duration_ms)
+          ? entry.duration_ms
+          : null,
       startedAt: entry?.started_at ?? null,
       completedAt: entry?.completed_at ?? null,
       summary: entry?.summary && typeof entry.summary === 'object' ? entry.summary : {},
