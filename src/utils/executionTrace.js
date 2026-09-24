@@ -812,6 +812,52 @@ export function executionFlow(stages) {
 }
 
 // ---------------------------------------------------------------------------
+// Investigation health indicators (Conflict / Uncertainty / Re-Investigation)
+// ---------------------------------------------------------------------------
+
+// Readable indicator values from the recorded health of a normalized trace.
+// Recorded values are never replaced: "none" reads as None, a detected state
+// keeps its recorded name, and re-investigation reports what really happened.
+export function healthIndicators(trace) {
+  const health = trace && typeof trace === 'object' ? trace.health : null
+
+  if (!health) {
+    return {
+      conflict: { value: '—', tone: 'muted' },
+      uncertainty: { value: '—', tone: 'muted' },
+      reinvestigation: { value: '—', tone: 'muted' },
+    }
+  }
+
+  const conflictDetected =
+    isPresent(health.conflictStatus) && health.conflictStatus !== 'none'
+  const uncertaintyDetected =
+    isPresent(health.uncertaintyStatus) && health.uncertaintyStatus !== 'none'
+
+  const reinvestigation =
+    health.requiresReinvestigation === null
+      ? { value: '—', tone: 'muted' }
+      : !health.requiresReinvestigation
+        ? { value: 'Not required', tone: 'ok' }
+        : health.performed
+          ? { value: 'Completed', tone: 'info' }
+          : { value: 'Required', tone: 'warn' }
+
+  // Recorded values are only capitalized for display — never replaced.
+  return {
+    conflict: {
+      value: conflictDetected ? humanize(health.conflictStatus) : 'None',
+      tone: conflictDetected ? 'warn' : 'ok',
+    },
+    uncertainty: {
+      value: uncertaintyDetected ? humanize(health.uncertaintyStatus) : 'None',
+      tone: uncertaintyDetected ? 'warn' : 'ok',
+    },
+    reinvestigation,
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Normalization
 // ---------------------------------------------------------------------------
 
