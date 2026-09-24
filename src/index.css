@@ -5520,3 +5520,222 @@ button {
 .investigation-indicator.is-danger strong {
   color: #f08a8a;
 }
+
+/* =========================================================
+   EXECUTIVE OVERVIEW (Main Dashboard)
+   Appended block — same palette/tokens as the rest of ResolveAI.
+   ========================================================= */
+
+.exec-kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(158px, 1fr));
+  gap: 14px;
+
+  margin-bottom: 18px;
+}
+
+.exec-kpi-grid .stat-card {
+  min-width: 0;
+}
+
+.exec-kpi-grid .stat-card small {
+  display: block;
+
+  margin-top: 4px;
+
+  color: #6c7887;
+  font-size: 9px;
+  line-height: 1.4;
+}
+
+/* Recorded counts in one bordered strip */
+.exec-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
+
+  overflow: hidden;
+
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid #1e2731;
+  border-radius: 12px;
+}
+
+.exec-strip-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+
+  padding: 13px 15px;
+
+  border-left: 1px solid #1e2731;
+  border-top: 2px solid #3a4653;
+}
+
+.exec-strip-cell:first-child {
+  border-left: none;
+}
+
+.exec-strip-cell>span {
+  font-size: 9px;
+  font-weight: 700;
+  color: #6c7887;
+  letter-spacing: 0.7px;
+  text-transform: uppercase;
+}
+
+.exec-strip-cell>strong {
+  font-size: 18px;
+  font-weight: 700;
+  color: #e8f0f6;
+  line-height: 1;
+}
+
+.exec-strip-cell>small {
+  font-size: 9.5px;
+  color: #71869a;
+}
+
+.exec-strip-cell.is-ok {
+  border-top-color: #20e0a8;
+}
+
+.exec-strip-cell.is-ok>strong {
+  color: #20e0a8;
+}
+
+.exec-strip-cell.is-danger {
+  border-top-color: #f08a8a;
+}
+
+.exec-strip-cell.is-danger>strong {
+  color: #f08a8a;
+}
+
+.exec-strip-cell.is-info {
+  border-top-color: #22d3ee;
+}
+
+.exec-strip-cell.is-info>strong {
+  color: #22d3ee;
+}
+
+.exec-strip-cell.is-warn {
+  border-top-color: #ffb35c;
+}
+
+.exec-strip-cell.is-warn>strong {
+  color: #ffb35c;
+}
+
+.exec-strip-cell.is-muted {
+  border-top-color: #3a4653;
+}
+
+.exec-strip-cell.is-muted>strong {
+  color: #8b99a7;
+}
+
+/* Panel bodies that are not tables */
+.exec-panel-body {
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+
+  padding: 16px 18px;
+}
+
+.exec-note {
+  font-size: 10.5px;
+  line-height: 1.6;
+  color: #6c7887;
+}
+
+.exec-tile-note {
+  margin-top: 2px;
+
+  font-size: 9.5px;
+  color: #6c7887;
+}
+
+.exec-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+
+  align-self: flex-start;
+
+  padding: 9px 14px;
+
+  color: #9fb3c4;
+  background: transparent;
+
+  border: 1px solid #1e2731;
+  border-radius: 8px;
+
+  font-size: 11px;
+  font-weight: 600;
+
+  transition: border-color 0.2s, color 0.2s;
+}
+
+.exec-action:hover {
+  color: #20dfff;
+  border-color: rgba(32, 223, 255, 0.35);
+}
+
+/* Executive summary + human review side by side */
+.exec-split {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(330px, 1fr));
+  gap: 18px;
+  align-items: start;
+
+  margin-top: 18px;
+}
+
+.exec-foot {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+
+  margin-top: 16px;
+
+  color: #515d6b;
+  font-size: 10.5px;
+}
+
+.exec-foot svg {
+  color: #20dfff;
+  flex-shrink: 0;
+}
+
+/* Recent cases table: wider issue/outcome columns, narrow time column */
+.exec-page .case-table th:nth-child(1),
+.exec-page .case-table td:nth-child(1) {
+  width: 15%;
+}
+
+.exec-page .case-table th:nth-child(2),
+.exec-page .case-table td:nth-child(2) {
+  width: 30%;
+}
+
+.exec-page .case-table th:nth-child(3),
+.exec-page .case-table td:nth-child(3) {
+  width: 14%;
+}
+
+.exec-page .case-table th:nth-child(4),
+.exec-page .case-table td:nth-child(4) {
+  width: 22%;
+}
+
+.exec-page .case-table th:nth-child(5),
+.exec-page .case-table td:nth-child(5) {
+  width: 19%;
+}
+
+/* Keep the recent-cases table readable on narrow screens (wrapper scrolls) */
+.exec-page .case-table {
+  min-width: 720px;
+}

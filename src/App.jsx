@@ -347,7 +347,7 @@ function App() {
   }
 
   const renderDashboard = () => (
-    <div className="dashboard-page">
+    <div className="dashboard-page exec-page">
       <div className="welcome-section">
         <div>
           <p className="eyebrow">AUTONOMOUS CUSTOMER SUPPORT</p>
@@ -370,7 +370,11 @@ function App() {
         </button>
       </div>
 
-      <DashboardData onViewAll={() => navigateTo('Case Management')} />
+      <DashboardData
+        onViewAll={() => navigateTo('Case Management')}
+        onOpenAgentDashboard={() => navigateTo('Agent Dashboard')}
+        onOpenCaseDetails={openCaseDetails}
+      />
     </div>
   )
 
