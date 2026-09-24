@@ -11,6 +11,7 @@ import {
   Play,
   RotateCcw,
   ScanSearch,
+  SearchCheck,
   ShieldAlert,
   ShieldCheck,
 } from 'lucide-react'
@@ -629,6 +630,188 @@ function extractDecisionChain(stages) {
 }
 
 // ---------------------------------------------------------------------------
+// Compact execution flow (Triage -> Investigation -> Evidence -> Decision -> Action)
+// ---------------------------------------------------------------------------
+
+// One compact step per phase, aggregated from the stages that really ran. The
+// long stage-by-stage trace stays behind the expandable section; this summary
+// only reports what the stored trace says.
+const DECISION_PHASE_STAGES = [
+  'decision_gate',
+  'decision_agent',
+  'decision_authority',
+  'action_safety',
+]
+
+const FLOW_PHASES = [
+  {
+    key: 'triage',
+    label: 'Triage',
+    icon: ScanSearch,
+    matches: (entry) => entry.stage === 'triage',
+  },
+  {
+    key: 'investigation',
+    label: 'Investigation',
+    icon: SearchCheck,
+    matches: (entry) =>
+      entry.stage === 'investigation_planner' || entry.isAgent,
+  },
+  {
+    key: 'evidence',
+    label: 'Evidence',
+    icon: Database,
+    matches: (entry) => entry.stage === 'evidence_engine',
+  },
+  {
+    key: 'decision',
+    label: 'Decision',
+    icon: Brain,
+    matches: (entry) => DECISION_PHASE_STAGES.includes(entry.stage),
+  },
+  {
+    key: 'action',
+    label: 'Action',
+    icon: Play,
+    matches: (entry) => entry.stage === 'action_executor',
+  },
+]
+
+// Worst recorded status wins, so a phase is never shown as completed when one
+// of its stages failed or was blocked.
+const STATUS_SEVERITY = {
+  failed: 5,
+  blocked: 4,
+  started: 3,
+  completed: 2,
+  skipped: 1,
+  unknown: 0,
+}
+
+function aggregateStatus(entries) {
+  if (entries.length === 0) return 'skipped'
+
+  let worst = entries[0].status
+
+  for (const entry of entries) {
+    const severity = STATUS_SEVERITY[entry.status] ?? 0
+    const worstSeverity = STATUS_SEVERITY[worst] ?? 0
+
+    if (severity > worstSeverity) worst = entry.status
+  }
+
+  return worst
+}
+
+function flowDetail(key, entries) {
+  const data = (name) => entries.find((entry) => entry.stage === name)?.summary ?? {}
+
+  if (key === 'triage') {
+    return isPresent(data('triage').intent) ? String(data('triage').intent) : null
+  }
+
+  if (key === 'investigation') {
+    // Only the agents that really ran are counted; a stage the plan skipped is
+    // reported in the full trace view instead.
+    const agents = entries.filter(
+      (entry) => entry.isAgent && entry.status !== 'skipped'
+    )
+    const findings = agents.reduce(
+      (total, entry) =>
+        total +
+        (typeof entry.summary.finding_count === 'number'
+          ? entry.summary.finding_count
+          : 0),
+      0
+    )
+
+    if (agents.length === 0) return null
+
+    return `${agents.length} agent${agents.length === 1 ? '' : 's'} · ${findings} findings`
+  }
+
+  if (key === 'evidence') {
+    const count = data('evidence_engine').evidence_count
+
+    return typeof count === 'number'
+      ? `${count} evidence item${count === 1 ? '' : 's'}`
+      : null
+  }
+
+  if (key === 'decision') {
+    const parts = []
+    const gate = data('decision_gate').status
+    const decision = data('decision_agent').decision
+    const authority = data('decision_authority').status
+
+    if (isPresent(gate)) parts.push(`Gate: ${gate}`)
+    if (isPresent(decision)) parts.push(`Agent: ${decision}`)
+    if (isPresent(authority)) parts.push(`Authority: ${authority}`)
+
+    return parts.length > 0 ? parts.join(' · ') : null
+  }
+
+  if (key === 'action') {
+    const executor = data('action_executor')
+    const parts = []
+
+    if (isPresent(executor.action)) parts.push(humanize(executor.action))
+    if (isPresent(executor.status)) parts.push(`Result: ${executor.status}`)
+    if (parts.length === 0 && isPresent(executor.reason)) {
+      parts.push(`Reason: ${executor.reason}`)
+    }
+
+    return parts.length > 0 ? parts.join(' · ') : null
+  }
+
+  return null
+}
+
+function flowValue(key, entries) {
+  const data = (name) => entries.find((entry) => entry.stage === name)?.summary ?? {}
+
+  if (key === 'decision') {
+    const decision = data('decision_agent').decision
+
+    if (isPresent(decision)) return String(decision).toUpperCase()
+
+    return isPresent(data('decision_gate').status)
+      ? String(data('decision_gate').status).toUpperCase()
+      : null
+  }
+
+  if (key === 'action') {
+    return isPresent(data('action_executor').action)
+      ? humanize(data('action_executor').action)
+      : null
+  }
+
+  return null
+}
+
+// executionFlow(stages) -> the five compact steps of a stored trace.
+export function executionFlow(stages) {
+  const list = Array.isArray(stages) ? stages : []
+
+  return FLOW_PHASES.map((phase) => {
+    const entries = list.filter((entry) => phase.matches(entry))
+    const status = aggregateStatus(entries)
+
+    return {
+      key: phase.key,
+      label: phase.label,
+      icon: phase.icon,
+      status,
+      statusLabel: statusLabel(status),
+      statusClass: statusClass(status),
+      value: flowValue(phase.key, entries),
+      detail: flowDetail(phase.key, entries),
+      recorded: entries.length > 0,
+    }
+  })
+}
+
+// ---------------------------------------------------------------------------
 // Normalization
 // ---------------------------------------------------------------------------
 
@@ -681,6 +864,7 @@ export function normalizeTrace(trace) {
     totalDuration: traceTotalDuration(trace),
     stages,
     agentStages: stages.filter((entry) => entry.isAgent),
+    flow: executionFlow(stages),
     overview: extractOverview(stages),
     evidence: extractEvidence(stages),
     health: extractHealth(stages),
